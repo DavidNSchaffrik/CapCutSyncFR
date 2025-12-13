@@ -68,4 +68,35 @@ class Transcript:
         return max((s.end_s for s in self.segements), default=0.0)
     
 
-    
+    class FFmpegAudioExtractor:
+        """
+        Extract audio from Adobe Express video file. 
+        """
+
+        def __init__(self, sample_rate: int = 16000):
+            self.sample_rate = sample_rate
+
+
+        def extract_wav(self, videopath: str, output_wav_path: str) -> str:
+            vp = Path(videopath)
+            wp = Path(output_wav_path)
+            wp.parent.mkdir(parents=True, exist_ok=True)
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i", str(vp),
+                "-vn",
+                "-ac", "1",
+                "-ar", str(self.sample_rate),
+                "-c:a", "pcm_s16le"
+                str(wp),
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed:\n{proc.stderr}")
+            
+            return str(wp)
+        
+
+        
