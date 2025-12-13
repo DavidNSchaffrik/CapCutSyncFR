@@ -201,7 +201,19 @@ class CapCutProject:
             self.cc.VideoMaterial(new_video_path)
         )
 
-        
+    def ensure_text_track(self, track_name: str) -> None:
+        try:
+            self.script_file.add_track(self.cc.TrackType.text, track_name)
+        except Exception:
+            pass
+
+    def add_text_cue(self, cue: TextCue) -> None:
+        seg = self.cc.TextSegment(
+            cue.text,
+            self.trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
+        )
+        self.script_file.add_segment(seg, cue.track)
+
 
 
 
