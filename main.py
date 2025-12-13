@@ -88,8 +88,10 @@ class QuizItem:
 @dataclass(frozen=True)
 class TextSlot:
     name: str
-    track_name: str
+    track_type: cc.TrackType
+    track_index: int
     segment_index: int
+
 
 
 @dataclass(frozen=True)
@@ -257,12 +259,13 @@ def make_list_reveal_layout_multi_track() -> TemplateLayout:
         each with 1 segment (index 0)
     """
     return TemplateLayout(slots=[
-        TextSlot("en_list", "EN_LIST_ANCHOR", 0),
-        TextSlot("fr_0", "FR_SLOTS_ANCHOR_1", 0),
-        TextSlot("fr_1", "FR_SLOTS_ANCHOR_2", 0),
-        TextSlot("fr_2", "FR_SLOTS_ANCHOR_3", 0),
-        TextSlot("fr_3", "FR_SLOTS_ANCHOR_4", 0),
-        TextSlot("fr_4", "FR_SLOTS_ANCHOR_5", 0),
+
+        TextSlot("en_list", cc.TrackType.text, track_index=0, segment_index=0),
+        TextSlot("fr_0",    cc.TrackType.text, track_index=1, segment_index=0),
+        TextSlot("fr_1",    cc.TrackType.text, track_index=2, segment_index=0),
+        TextSlot("fr_2",    cc.TrackType.text, track_index=3, segment_index=0),
+        TextSlot("fr_3",    cc.TrackType.text, track_index=4, segment_index=0),
+        TextSlot("fr_4",    cc.TrackType.text, track_index=5, segment_index=0),
     ])
 
     
@@ -382,6 +385,7 @@ class SlotRenderer:
     ) -> None:
         project = CapCutProject(self.drafts_folder)
         project.open_from_template(template_name, new_draft_name)
+        debug_list_imported_tracks(project.script_file)
         project.replace_video_by_name(placeholder_video_filename, final_video_path)
         project.ensure_text_track(self.render_track)
 
@@ -390,9 +394,9 @@ class SlotRenderer:
             slot = layout.slot(cue.slot_name)
 
             anchor_track = project.script_file.get_imported_track(
-                cc.TrackType.text,
-                name=slot.track_name,
-            )
+                slot.track_type,
+                index=slot.track_index,
+                )
 
             # If this errors in your environment, paste the error; track/segment access differs by version.
             anchor_seg = anchor_track.segments[slot.segment_index]
@@ -406,14 +410,25 @@ class SlotRenderer:
             )
             project.script_file.add_segment(seg, self.render_track)
 
-        # Wipe the anchor text in template tracks (neutralise originals)
+
+         # Wipe the anchor text in template tracks (neutralise originals)
+        seen: set[tuple[cc.TrackType, int]] = set()
+
         for slot in layout.slots():
-            t = project.script_file.get_imported_track(cc.TrackType.text, name=slot.track_name)
+            key = (slot.track_type, slot.track_index)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            t = project.script_file.get_imported_track(slot.track_type, index=slot.track_index)
+
             for idx in range(len(t.segments)):
                 try:
                     project.script_file.replace_text(t, idx, "")
                 except Exception:
                     pass
+       
+
 
         project.save()
 
@@ -426,6 +441,20 @@ def unique_draft_name(base: str) -> str:
         except Exception:
             return name
     raise RuntimeError("Could not find a free draft name.")
+
+def debug_list_imported_tracks(script_file) -> None:
+    for ttype in (cc.TrackType.text, cc.TrackType.video, cc.TrackType.audio):
+        print(f"\n--- Imported tracks for {ttype} ---")
+        for i in range(20):
+            try:
+                t = script_file.get_imported_track(ttype, index=i)
+            except Exception:
+                break
+            # Best-effort introspection (pycapcut versions differ)
+            name = getattr(t, "name", None)
+            segs = getattr(t, "segments", None)
+            seg_count = len(segs) if isinstance(segs, list) else "?"
+            print(f"index={i} name={name!r} segments={seg_count}")
 
 
 if __name__ == "__main__":
