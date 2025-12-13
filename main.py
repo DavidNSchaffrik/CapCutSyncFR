@@ -420,18 +420,57 @@ class SlotRenderer:
 
 
 if __name__ == "__main__":
-    VIDEO_PATH = "final_video.mp4"   # change this
+    # ---- INPUT VIDEO (the final mp4 you want to use) ----
+    VIDEO_PATH = r"C:\Users\david\Downloads\final_video.mp4"
     WORK_DIR = "./work"
+
+    # ---- WHISPERX ----
     MODEL = "small"
-    DEVICE = "cpu"  # use "cuda" if you have an NVIDIA GPU
+    DEVICE = "cpu"           # "cuda" if you have NVIDIA GPU
+    COMPUTE_TYPE = "int8"    # good for CPU
 
+    # ---- CAPCUT TEMPLATE SETTINGS ----
+    DRAFTS_FOLDER = r"C:\Users\david\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
+    TEMPLATE_NAME = "5_word_template"
+    NEW_DRAFT_NAME = "ListReveal_Output_001"
+
+    # This is the filename of the placeholder video material INSIDE the template
+    PLACEHOLDER_VIDEO_FILENAME = "ElevenLabs_2025-10-25T10_46_53_Guillaume-Narration_pvc_sp100_s52_sb47_t2-5.mp4"
+
+    # ---- 1) Transcribe ----
     extractor = FFmpegAudioExtractor(sample_rate=16000)
-    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE, compute_type="int8")
+    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
     pipeline = VideoToTranscriptPipeline(extractor, transcriber)
-
     transcript = pipeline.run(VIDEO_PATH, work_dir=WORK_DIR)
 
     print("Language:", transcript.language)
     print("Duration:", transcript.duration_s)
-    for seg in transcript.segments[:10]:
+    for seg in transcript.segments[:12]:
         print(f"[{seg.start_s:.2f} - {seg.end_s:.2f}] {seg.text}")
+
+    # ---- 2) Choose module ----
+    registry = ModuleRegistry([
+        ListRevealModule(max_items=5),
+    ])
+    module = registry.get("list_reveal")
+
+    # ---- 3) Choose layout (pick ONE) ----
+    # Use ONE of these depending on how your anchors are structured in the template:
+    # layout = make_list_reveal_layout_single_track()
+    layout = make_list_reveal_layout_multi_track()
+
+    # ---- 4) Build cues ----
+    cues = module.build(transcript, layout)
+
+    # ---- 5) Render into CapCut draft ----
+    renderer = SlotRenderer(drafts_folder=DRAFTS_FOLDER, render_track="RENDER_TEXT")
+    renderer.render(
+        template_name=TEMPLATE_NAME,
+        new_draft_name=NEW_DRAFT_NAME,
+        placeholder_video_filename=PLACEHOLDER_VIDEO_FILENAME,
+        final_video_path=VIDEO_PATH,
+        layout=layout,
+        cues=cues,
+    )
+
+    print("Done. Draft created:", NEW_DRAFT_NAME)
