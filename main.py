@@ -30,3 +30,10 @@ class TextCue:
     start_s: float
     duration_s: float
     track: str  # "auto_text" / "subtitle" etc.
+
+
+
+@dataclass(frozen=True)
+class TimelinePlan:
+    cues: list[TextCue]
+    total_duration_s: float
