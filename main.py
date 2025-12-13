@@ -244,17 +244,6 @@ class CapCutProject:
         self.script_file.save()
 
 
-class TemplateLayout:
-    def __init__(self, slots: list[TextSlot]):
-        self._slots = {s.name: s for s in slots}
-    
-    def slot(self, name: str) -> TextSlot:
-        return self._slots[name]
-    
-    def slots(self) -> list[TextSlot]:
-        return list(self._slots.values())
-    
-
 class QuizParser:
     """Transcript -> list[QuizItem] assuming Question? then Answer."""
     def parse(self, transcript: Transcript) -> list[QuizItem]:
@@ -283,6 +272,83 @@ class QuizParser:
             i += 2
 
         return items
+
+
+class TemplateLayout:
+    def __init__(self, slots: list[TextSlot]):
+        self._slots = {s.name: s for s in slots}
+    
+    def slot(self, name: str) -> TextSlot:
+        return self._slots[name]
+    
+    def slots(self) -> list[TextSlot]:
+        return list(self._slots.values())
+    
+
+def make_list_reveal_layout_multi_track() -> TemplateLayout:
+    """
+    Use this if you have:
+      - EN_LIST_ANCHOR track with 1 segment (index 0)
+      - 5 separate tracks: FR_SLOTS_ANCHOR_1 .. FR_SLOTS_ANCHOR_5
+        each with 1 segment (index 0)
+    """
+    return TemplateLayout(slots=[
+        TextSlot("en_list", "EN_LIST_ANCHOR", 0),
+        TextSlot("fr_0", "FR_SLOTS_ANCHOR_1", 0),
+        TextSlot("fr_1", "FR_SLOTS_ANCHOR_2", 0),
+        TextSlot("fr_2", "FR_SLOTS_ANCHOR_3", 0),
+        TextSlot("fr_3", "FR_SLOTS_ANCHOR_4", 0),
+        TextSlot("fr_4", "FR_SLOTS_ANCHOR_5", 0),
+    ])
+
+    
+
+
+class ListRevealModule:
+    """
+    English list stays up; French answers reveal using fr_0..fr_4 slots.
+    """
+    name = "list_reveal"
+
+    def __init__(self, max_items: int = 5, lead_in_s: float = 0.05, tail_s: float = 0.10):
+        self.max_items = max_items
+        self.lead_in_s = lead_in_s
+        self.tail_s = tail_s
+
+    def build(self, transcript: Transcript, layout: TemplateLayout) -> list[PlannedCue]:
+        items = QuizParser().parse(transcript)[: self.max_items]
+        if not items:
+            return []
+
+        cues: list[PlannedCue] = []
+
+        # English list block
+        en_text = "\n".join(it.question_text for it in items)
+        start = max(0.0, items[0].q_start - self.lead_in_s)
+        end = min(transcript.duration_s, items[-1].a_end + self.tail_s)
+
+        cues.append(PlannedCue(
+            text=en_text,
+            start_s=start,
+            duration_s=max(0.1, end - start),
+            slot_name="en_list",
+        ))
+
+        # French reveals
+        for i, it in enumerate(items):
+            slot_name = f"fr_{min(i, self.max_items - 1)}"
+            a_start = max(0.0, it.a_start - self.lead_in_s)
+            a_end = min(transcript.duration_s, it.a_end + self.tail_s)
+
+            cues.append(PlannedCue(
+                text=it.answer_text,
+                start_s=a_start,
+                duration_s=max(0.2, a_end - a_start),
+                slot_name=slot_name,
+            ))
+
+        return cues
+
 
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
