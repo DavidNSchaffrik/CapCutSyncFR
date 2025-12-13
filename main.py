@@ -121,8 +121,8 @@ class WhisperTranscriber:
             compute_type=self.compute_type,
             vad_method="silero",
         )
-        result = model.transcribe(audio)
-        language = result.get("language") or "en"
+        result = model.transcribe(audio, language="en")
+        language = "en"
 
         align_model, metadata = whisperx.load_align_model(language_code=language, device=self.device)
         aligned = whisperx.align(
