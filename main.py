@@ -1,10 +1,12 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 from typing import Optional
 import whisperx
+import pycapcut as cc
+from pycapcut import trange
+
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,22 @@ class VideoToTranscriptPipeline:
         wav_path = work / (Path(video_path).stem + ".wav")
         wav = self.extractor.extract_wav(video_path, str(wav_path))
         return self.transcriber.transcribe(wav)
+
+
+
+class CapCutProject:
+    def __init__(self, drafts_folder: str):
+        self.cc = cc
+        self.trange = trange
+        self.draft_folder = cc.DraftFolder(drafts_folder)
+        self.script_file = None
+
+
+    def open_from_template(self, template_name: str, new_name: str) -> None:
+        self.script_file = self.draft_folder.duplicate_as_template(template_name, new_name)
+
+    
+
 
 
 if __name__ == "__main__":
