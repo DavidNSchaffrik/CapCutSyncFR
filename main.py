@@ -72,7 +72,24 @@ class Transcript:
     @property
     def duration_s(self) -> float:
         return max((s.end_s for s in self.segments), default=0.0)
+    
 
+@dataclass(frozen=True)
+class QuizItem:
+    question_text: str
+    answer_text: str
+    q_start: float
+    q_end: float
+    a_start: float
+    a_end: float
+
+
+
+@dataclass(frozen=True)
+class TextSlot:
+    name: str
+    track_name: str
+    segment_index: int
 
 class FFmpegAudioExtractor:
     """Extract mono WAV audio from a video file using ffmpeg."""
@@ -215,7 +232,21 @@ class CapCutProject:
         self.script_file.add_segment(seg, cue.track)
 
 
+    def save(self) -> None:
+        self.script_file.save()
 
+
+class TemplateLayout:
+    def __init__(self, slots: list[TextSlot]):
+        self._slots = {s.name: s for s in slots}
+    
+    def slot(self, name: str) -> TextSlot:
+        return self._slots[name]
+    
+    def slots(self) -> list[TextSlot]:
+        return list(self._slots.values())
+    
+    
 
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
