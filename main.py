@@ -349,6 +349,15 @@ class ListRevealModule:
 
         return cues
 
+class ModuleRegistry:
+    def __init__(self, modules: list[QuizModule]):
+        self._modules = {m.name: m for m in modules}
+
+    def get(self, name: str) -> QuizModule:
+        return self._modules[name]
+
+    def names(self) -> list[str]:
+        return list(self._modules.keys())
 
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
