@@ -115,7 +115,8 @@ class WhisperTranscriber:
         model = whisperx.load_model(
             self.model_name,
             self.device,
-            compute_type=self.compute_type,  # <-- key fix
+            compute_type=self.compute_type,
+            vad_method="silero",
         )
         result = model.transcribe(audio)
         language = result.get("language") or "en"
