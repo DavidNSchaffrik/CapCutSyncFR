@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 from typing import Optional
+import whisperx
 
 @dataclass(frozen=True)
 class ScriptLine:
@@ -32,7 +33,6 @@ class TextCue:
     start_s: float
     duration_s: float
     track: str  # "auto_text" / "subtitle" etc.
-
 
 
 @dataclass(frozen=True)
@@ -99,4 +99,70 @@ class Transcript:
             return str(wp)
         
 
-        
+class WhisperTranscriber:
+    """
+    Transcribes the WAV file and returns timestamped segments (+ word timestamps when available).
+    Requires: whisperx + torch.
+    """
+    def __init__(self, model_name: str = "small", device: str = "cpu"):
+        self.model_name = model_name
+        self.device = device
+
+    def transcribe(self, wav_path: str) -> Transcript:
+        audio = whisperx.load_audio(wav_path)
+
+        model = whisperx.load_model(self.model_name, self.device)
+        result = model.transcribe(audio)
+        language = result.get("language") or "en"
+
+        align_model, metadata = whisperx.load_align_model(language_code=language, device=self.device)
+        aligned = whisperx.align(
+            result["segments"],
+            align_model,
+            metadata,
+            audio,
+            self.device,
+            return_char_alignments=False,
+        )
+
+        segments: list[TranscriptSegment] = []
+        for seg in aligned["segments"]:
+            words: Optional[list[TranscriptWord]] = None
+
+            if seg.get("words"):
+                word_list: list[TranscriptWord] = []
+                for w in seg["words"]:
+                    start = w.get("start")
+                    end = w.get("end")
+                    if start is None or end is None:
+                        continue
+
+                    word_list.append(
+                        TranscriptWord(
+                            text=w.get("word", "").strip(),
+                            start_s=float(start),
+                            end_s=float(end),
+                            confidence=w.get("score"),
+                        )
+                    )
+                words = word_list
+
+            segments.append(
+                TranscriptSegment(
+                    id=int(seg.get("id", len(segments))),
+                    text=seg.get("text", "").strip(),
+                    start_s=float(seg["start"]),
+                    end_s=float(seg["end"]),
+                    words=words,
+                )
+            )
+
+        return Transcript(language=aligned.get("language") or language, segments=segments)
+
+
+
+            
+
+
+            
+
