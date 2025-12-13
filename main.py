@@ -91,6 +91,14 @@ class TextSlot:
     track_name: str
     segment_index: int
 
+
+@dataclass(frozen=True)
+class PlannedCue:
+    text: str
+    start_s: float
+    duration_s: float
+    slot_name: str
+
 class FFmpegAudioExtractor:
     """Extract mono WAV audio from a video file using ffmpeg."""
 
@@ -246,7 +254,35 @@ class TemplateLayout:
     def slots(self) -> list[TextSlot]:
         return list(self._slots.values())
     
-    
+
+class QuizParser:
+    """Transcript -> list[QuizItem] assuming Question? then Answer."""
+    def parse(self, transcript: Transcript) -> list[QuizItem]:
+        items: list[QuizItem] = []
+        segs = transcript.segments
+
+        i = 0
+        while i < len(segs) - 1:
+            q = segs[i]
+            a = segs[i + 1]
+
+            if not q.text.strip().endswith("?"):
+                i += 1
+                continue
+
+            items.append(
+                QuizItem(
+                    question_text=q.text.strip(),
+                    answer_text=a.text.strip(),
+                    q_start=q.start_s,
+                    q_end=q.end_s,
+                    a_start=a.start_s,
+                    a_end=a.end_s,
+                )
+            )
+            i += 2
+
+        return items
 
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
