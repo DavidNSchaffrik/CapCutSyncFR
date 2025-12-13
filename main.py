@@ -104,18 +104,19 @@ class FFmpegAudioExtractor:
         
 
 class WhisperTranscriber:
-    """
-    Transcribes the WAV file and returns timestamped segments (+ word timestamps when available).
-    Requires: whisperx + torch.
-    """
-    def __init__(self, model_name: str = "small", device: str = "cpu"):
+    def __init__(self, model_name: str = "small", device: str = "cpu", compute_type: str = "int8"):
         self.model_name = model_name
         self.device = device
+        self.compute_type = compute_type
 
     def transcribe(self, wav_path: str) -> Transcript:
         audio = whisperx.load_audio(wav_path)
 
-        model = whisperx.load_model(self.model_name, self.device)
+        model = whisperx.load_model(
+            self.model_name,
+            self.device,
+            compute_type=self.compute_type,  # <-- key fix
+        )
         result = model.transcribe(audio)
         language = result.get("language") or "en"
 
@@ -132,16 +133,14 @@ class WhisperTranscriber:
         segments: list[TranscriptSegment] = []
         for seg in aligned["segments"]:
             words: Optional[list[TranscriptWord]] = None
-
             if seg.get("words"):
-                word_list: list[TranscriptWord] = []
+                wl: list[TranscriptWord] = []
                 for w in seg["words"]:
                     start = w.get("start")
                     end = w.get("end")
                     if start is None or end is None:
                         continue
-
-                    word_list.append(
+                    wl.append(
                         TranscriptWord(
                             text=w.get("word", "").strip(),
                             start_s=float(start),
@@ -149,7 +148,7 @@ class WhisperTranscriber:
                             confidence=w.get("score"),
                         )
                     )
-                words = word_list
+                words = wl
 
             segments.append(
                 TranscriptSegment(
@@ -187,7 +186,7 @@ if __name__ == "__main__":
     DEVICE = "cpu"  # use "cuda" if you have an NVIDIA GPU
 
     extractor = FFmpegAudioExtractor(sample_rate=16000)
-    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE)
+    transcriber = WhisperTranscriber(model_name=MODEL, device="cpu", compute_type="int8")
     pipeline = VideoToTranscriptPipeline(extractor, transcriber)
 
     transcript = pipeline.run(VIDEO_PATH, work_dir=WORK_DIR)
