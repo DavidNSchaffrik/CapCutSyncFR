@@ -46,6 +46,7 @@ class TranscriptWord:
     text: str
     start_s: float
     end_s: float
+    confidence: Optional[float] = None
 
 
 
