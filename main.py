@@ -417,11 +417,20 @@ class SlotRenderer:
 
         project.save()
 
+def unique_draft_name(base: str) -> str:
+    # tries base, then base_002, base_003, ...
+    for i in range(1, 1000):
+        name = base if i == 1 else f"{base}_{i:03d}"
+        try:
+            cc.DraftFolder(DRAFTS_FOLDER).load_template(name)
+        except Exception:
+            return name
+    raise RuntimeError("Could not find a free draft name.")
 
 
 if __name__ == "__main__":
     # ---- INPUT VIDEO (the final mp4 you want to use) ----
-    VIDEO_PATH = r"C:\Users\david\Downloads\final_video.mp4"
+    VIDEO_PATH = r"final_video.mp4"
     WORK_DIR = "./work"
 
     # ---- WHISPERX ----
@@ -432,7 +441,8 @@ if __name__ == "__main__":
     # ---- CAPCUT TEMPLATE SETTINGS ----
     DRAFTS_FOLDER = r"C:\Users\david\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
     TEMPLATE_NAME = "5_word_template"
-    NEW_DRAFT_NAME = "ListReveal_Output_001"
+    NEW_DRAFT_NAME = unique_draft_name("ListReveal_Output")
+
 
     # This is the filename of the placeholder video material INSIDE the template
     PLACEHOLDER_VIDEO_FILENAME = "ElevenLabs_2025-10-25T10_46_53_Guillaume-Narration_pvc_sp100_s52_sb47_t2-5.mp4"
