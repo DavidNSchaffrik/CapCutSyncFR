@@ -208,42 +208,6 @@ class VideoToTranscriptPipeline:
         return self.transcriber.transcribe(wav)
 
 
-
-class CapCutProject:
-    def __init__(self, drafts_folder: str):
-        self.cc = cc
-        self.trange = trange
-        self.draft_folder = cc.DraftFolder(drafts_folder)
-        self.script_file = None
-
-
-    def open_from_template(self, template_name: str, new_name: str) -> None:
-        self.script_file = self.draft_folder.duplicate_as_template(template_name, new_name)
-
-    def replace_video_by_name(self, placeholder_filename: str, new_video_path: str) -> None:
-        self.script_file.replace_material_by_name(
-            placeholder_filename,
-            self.cc.VideoMaterial(new_video_path)
-        )
-
-    def ensure_text_track(self, track_name: str) -> None:
-        try:
-            self.script_file.add_track(self.cc.TrackType.text, track_name)
-        except Exception:
-            pass
-
-    def add_text_cue(self, cue: TextCue) -> None:
-        seg = self.cc.TextSegment(
-            cue.text,
-            self.trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
-        )
-        self.script_file.add_segment(seg, cue.track)
-
-
-    def save(self) -> None:
-        self.script_file.save()
-
-
 class QuizParser:
     """Transcript -> list[QuizItem] assuming Question? then Answer."""
     def parse(self, transcript: Transcript) -> list[QuizItem]:
@@ -358,6 +322,102 @@ class ModuleRegistry:
 
     def names(self) -> list[str]:
         return list(self._modules.keys())
+
+
+
+class CapCutProject:
+    def __init__(self, drafts_folder: str):
+        self.cc = cc
+        self.trange = trange
+        self.draft_folder = cc.DraftFolder(drafts_folder)
+        self.script_file = None
+
+
+    def open_from_template(self, template_name: str, new_name: str) -> None:
+        self.script_file = self.draft_folder.duplicate_as_template(template_name, new_name)
+
+    def replace_video_by_name(self, placeholder_filename: str, new_video_path: str) -> None:
+        self.script_file.replace_material_by_name(
+            placeholder_filename,
+            self.cc.VideoMaterial(new_video_path)
+        )
+
+    def ensure_text_track(self, track_name: str) -> None:
+        try:
+            self.script_file.add_track(self.cc.TrackType.text, track_name)
+        except Exception:
+            pass
+
+    def add_text_cue(self, cue: TextCue) -> None:
+        seg = self.cc.TextSegment(
+            cue.text,
+            self.trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
+        )
+        self.script_file.add_segment(seg, cue.track)
+
+
+    def save(self) -> None:
+        self.script_file.save()
+
+
+class SlotRenderer:
+    """
+    Renders PlannedCues by copying styling from template anchor slots.
+    - Adds generated segments into a new track (RENDER_TEXT)
+    - Wipes template anchor text so only generated text remains visible
+    """
+
+    def __init__(self, drafts_folder: str, render_track: str = "RENDER_TEXT"):
+        self.drafts_folder = drafts_folder
+        self.render_track = render_track
+
+    def render(
+        self,
+        template_name: str,
+        new_draft_name: str,
+        placeholder_video_filename: str,
+        final_video_path: str,
+        layout: TemplateLayout,
+        cues: list[PlannedCue],
+    ) -> None:
+        project = CapCutProject(self.drafts_folder)
+        project.open_from_template(template_name, new_draft_name)
+        project.replace_video_by_name(placeholder_video_filename, final_video_path)
+        project.ensure_text_track(self.render_track)
+
+        # Create new segments using anchor styling
+        for cue in cues:
+            slot = layout.slot(cue.slot_name)
+
+            anchor_track = project.script_file.get_imported_track(
+                cc.TrackType.text,
+                name=slot.track_name,
+            )
+
+            # If this errors in your environment, paste the error; track/segment access differs by version.
+            anchor_seg = anchor_track.segments[slot.segment_index]
+
+            seg = cc.TextSegment(
+                cue.text,
+                trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
+                font=anchor_seg.font,
+                style=anchor_seg.style,
+                clip_settings=anchor_seg.clip_settings,
+            )
+            project.script_file.add_segment(seg, self.render_track)
+
+        # Wipe the anchor text in template tracks (neutralise originals)
+        for slot in layout.slots():
+            t = project.script_file.get_imported_track(cc.TrackType.text, name=slot.track_name)
+            for idx in range(len(t.segments)):
+                try:
+                    project.script_file.replace_text(t, idx, "")
+                except Exception:
+                    pass
+
+        project.save()
+
+
 
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
