@@ -68,35 +68,39 @@ class Transcript:
         return max((s.end_s for s in self.segements), default=0.0)
     
 
-    class FFmpegAudioExtractor:
-        """
-        Extract audio from Adobe Express video file. 
-        """
+class FFmpegAudioExtractor:
+    """Extract mono WAV audio from a video file using ffmpeg."""
 
-        def __init__(self, sample_rate: int = 16000):
-            self.sample_rate = sample_rate
+    def __init__(self, sample_rate: int = 16000) -> None:
+        self.sample_rate = sample_rate
 
+    def extract_wav(self, video_path: str, output_wav_path: str) -> str:
+        vp = Path(video_path)
+        wp = Path(output_wav_path)
+        wp.parent.mkdir(parents=True, exist_ok=True)
 
-        def extract_wav(self, videopath: str, output_wav_path: str) -> str:
-            vp = Path(videopath)
-            wp = Path(output_wav_path)
-            wp.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",                 # overwrite output
+            "-i", str(vp),        # input video
+            "-vn",                # no video stream
+            "-ac", "1",           # mono
+            "-ar", str(self.sample_rate),
+            "-c:a", "pcm_s16le",  # 16-bit PCM WAV
+            str(wp),              # output path
+        ]
 
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", str(vp),
-                "-vn",
-                "-ac", "1",
-                "-ar", str(self.sample_rate),
-                "-c:a", "pcm_s16le"
-                str(wp),
-            ]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if proc.returncode != 0:
-                raise RuntimeError(f"ffmpeg failed:\n{proc.stderr}")
-            
-            return str(wp)
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed:\n{proc.stderr}")
+
+        return str(wp)
+
         
 
 class WhisperTranscriber:
@@ -161,6 +165,37 @@ class WhisperTranscriber:
 
 
 
+class VideoToTranscriptPipeline:
+    def __init__(self, extractor: FFmpegAudioExtractor, transcriber: WhisperTranscriber):
+        self.extractor = extractor
+        self.transcriber = transcriber
+
+    def run(self, video_path: str, work_dir: str = "./work") -> Transcript:
+        work = Path(work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+
+        wav_path = work / (Path(video_path).stem + ".wav")
+        wav = self.extractor.extract_wav(video_path, str(wav_path))
+        return self.transcriber.transcribe(wav)
+
+
+
+if __name__ == "__main__":
+    VIDEO_PATH = "final_video.mp4"   # change this
+    WORK_DIR = "./work"
+    MODEL = "small"
+    DEVICE = "cpu"  # use "cuda" if you have an NVIDIA GPU
+
+    extractor = FFmpegAudioExtractor(sample_rate=16000)
+    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE)
+    pipeline = VideoToTranscriptPipeline(extractor, transcriber)
+
+    transcript = pipeline.run(VIDEO_PATH, work_dir=WORK_DIR)
+
+    print("Language:", transcript.language)
+    print("Duration:", transcript.duration_s)
+    for seg in transcript.segments[:10]:
+        print(f"[{seg.start_s:.2f} - {seg.end_s:.2f}] {seg.text}")
             
 
 
