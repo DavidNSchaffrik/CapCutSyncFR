@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,15 +6,18 @@ import subprocess
 from typing import Optional
 import whisperx
 
+
 @dataclass(frozen=True)
 class ScriptLine:
     id: str
     text: str
     kind: str  # "question" | "answer" | "cta" | "narration" | etc.
 
+
 @dataclass(frozen=True)
 class Script:
     lines: list[ScriptLine]
+
 
 @dataclass(frozen=True)
 class AlignedSpan:
@@ -23,9 +25,11 @@ class AlignedSpan:
     start_s: float
     end_s: float
 
+
 @dataclass(frozen=True)
 class Alignment:
     spans: dict[str, AlignedSpan]  # keyed by line_id
+
 
 @dataclass(frozen=True)
 class TextCue:
@@ -49,25 +53,24 @@ class TranscriptWord:
     confidence: Optional[float] = None
 
 
-
 @dataclass(frozen=True)
-class TranscriptSegement:
+class TranscriptSegment:
     id: int
     text: str
-    start_s = float
-    end_s = float
+    start_s: float
+    end_s: float
     words: Optional[list[TranscriptWord]] = None
 
 
 @dataclass(frozen=True)
 class Transcript:
     language: Optional[str]
-    segements: list[TranscriptSegement]
+    segments: list[TranscriptSegment]
 
     @property
     def duration_s(self) -> float:
-        return max((s.end_s for s in self.segements), default=0.0)
-    
+        return max((s.end_s for s in self.segments), default=0.0)
+
 
 class FFmpegAudioExtractor:
     """Extract mono WAV audio from a video file using ffmpeg."""
@@ -102,7 +105,6 @@ class FFmpegAudioExtractor:
 
         return str(wp)
 
-        
 
 class WhisperTranscriber:
     def __init__(self, model_name: str = "small", device: str = "cpu", compute_type: str = "int8"):
@@ -165,7 +167,6 @@ class WhisperTranscriber:
         return Transcript(language=aligned.get("language") or language, segments=segments)
 
 
-
 class VideoToTranscriptPipeline:
     def __init__(self, extractor: FFmpegAudioExtractor, transcriber: WhisperTranscriber):
         self.extractor = extractor
@@ -180,7 +181,6 @@ class VideoToTranscriptPipeline:
         return self.transcriber.transcribe(wav)
 
 
-
 if __name__ == "__main__":
     VIDEO_PATH = "final_video.mp4"   # change this
     WORK_DIR = "./work"
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     DEVICE = "cpu"  # use "cuda" if you have an NVIDIA GPU
 
     extractor = FFmpegAudioExtractor(sample_rate=16000)
-    transcriber = WhisperTranscriber(model_name=MODEL, device="cpu", compute_type="int8")
+    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE, compute_type="int8")
     pipeline = VideoToTranscriptPipeline(extractor, transcriber)
 
     transcript = pipeline.run(VIDEO_PATH, work_dir=WORK_DIR)
@@ -197,8 +197,3 @@ if __name__ == "__main__":
     print("Duration:", transcript.duration_s)
     for seg in transcript.segments[:10]:
         print(f"[{seg.start_s:.2f} - {seg.end_s:.2f}] {seg.text}")
-            
-
-
-            
-
