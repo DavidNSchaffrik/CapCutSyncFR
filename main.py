@@ -195,7 +195,13 @@ class CapCutProject:
     def open_from_template(self, template_name: str, new_name: str) -> None:
         self.script_file = self.draft_folder.duplicate_as_template(template_name, new_name)
 
-    
+    def replace_video_by_name(self, placeholder_filename: str, new_video_path: str) -> None:
+        self.script_file.replace_material_by_name(
+            placeholder_filename,
+            self.cc.VideoMaterial(new_video_path)
+        )
+
+        
 
 
 
