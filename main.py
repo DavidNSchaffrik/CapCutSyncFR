@@ -83,12 +83,14 @@ class Transcript:
 
 @dataclass(frozen=True)
 class QuizItem:
+    prompt_word: str       
     question_text: str
     answer_text: str
     q_start: float
     q_end: float
     a_start: float
     a_end: float
+
 
 
 
@@ -234,6 +236,7 @@ class QuizParser:
 
             items.append(
                 QuizItem(
+                    prompt_word=extract_english_word(q.text.strip()),
                     question_text=q.text.strip(),
                     answer_text=a.text.strip(),
                     q_start=q.start_s,
@@ -242,9 +245,30 @@ class QuizParser:
                     a_end=a.end_s,
                 )
             )
+
             i += 2
 
         return items
+    import re
+
+    def extract_english_word(question: str) -> str:
+        """
+        "How do we say summer in French ?" -> "summer"
+        Handles quotes and stray punctuation.
+        """
+        q = question.strip()
+
+        # common pattern
+        m = re.search(r"say\s+(.+?)\s+in\s+french", q, flags=re.IGNORECASE)
+        if m:
+            word = m.group(1).strip()
+        else:
+            # fallback: last meaningful token
+            word = q
+
+        # strip quotes/punct
+        word = word.strip(' "\'“”‘’?!.:,;')
+        return word
 
 
 class TemplateLayout:
@@ -297,7 +321,7 @@ class ListRevealModule:
         cues: list[PlannedCue] = []
 
         # English list block
-        en_text = "\n".join(it.question_text for it in items)
+        en_text = "\n".join(it.prompt_word for it in items)
         start = max(0.0, items[0].q_start - self.lead_in_s)
         end = min(transcript.duration_s, items[-1].a_end + self.tail_s)
 
@@ -440,13 +464,6 @@ class SlotRenderer:
 
         # Then patch timings on disk (won't overwrite text now)
         writer.flush_json_retimes()
-
-
-
-
-         
-       
-
 
         project.save()
 
