@@ -11,6 +11,8 @@ import copy
 from typing import Any
 from typing import Protocol
 import re
+import argparse
+
 
 
 class QuizModule(Protocol):
@@ -295,16 +297,39 @@ def make_list_reveal_layout_multi_track() -> TemplateLayout:
         TextSlot("fr_4",    track_type=cc.TrackType.text, track_index=5, segment_index=0),
     ])
 
+def make_list_reveal_layout_en_then_fr(n: int) -> TemplateLayout:
+    slots: list[TextSlot] = []
+
+    # EN slots first
+    for i in range(n):
+        slots.append(TextSlot(
+            name=f"en_{i}",
+            track_type=cc.TrackType.text,
+            track_index=i,
+            segment_index=0,
+        ))
+
+    # FR slots after
+    for i in range(n):
+        slots.append(TextSlot(
+            name=f"fr_{i}",
+            track_type=cc.TrackType.text,
+            track_index=n + i,
+            segment_index=0,
+        ))
+
+    return TemplateLayout(slots)
     
 
 
 class ListRevealModule:
     """
-    English list stays up; French answers reveal using fr_0..fr_4 slots.
+    One EN slot per item (en_0..en_{N-1})
+    One FR slot per item (fr_0..fr_{N-1})
     """
     name = "list_reveal"
 
-    def __init__(self, max_items: int = 5, lead_in_s: float = 0.05, tail_s: float = 0.10):
+    def __init__(self, max_items: int = 6, lead_in_s: float = 0.05, tail_s: float = 0.10):
         self.max_items = max_items
         self.lead_in_s = lead_in_s
         self.tail_s = tail_s
@@ -316,29 +341,30 @@ class ListRevealModule:
 
         cues: list[PlannedCue] = []
 
-        # English list block
-        en_text = "\n".join(it.prompt_word for it in items)
-        start = max(0.0, items[0].q_start - self.lead_in_s)
-        end = min(transcript.duration_s, items[-1].a_end + self.tail_s)
+        # EN should be visible for the whole quiz window
+        en_start = max(0.0, items[0].q_start - self.lead_in_s)
+        en_end   = min(transcript.duration_s, items[-1].a_end + self.tail_s)
+        en_dur   = max(0.2, en_end - en_start)
 
-        cues.append(PlannedCue(
-            text=en_text,
-            start_s=start,
-            duration_s=max(0.1, end - start),
-            slot_name="en_list",
-        ))
-
-        # French reveals
         for i, it in enumerate(items):
-            slot_name = f"fr_{min(i, self.max_items - 1)}"
-            a_start = max(0.0, it.a_start - self.lead_in_s)
-            end = transcript.duration_s
+            # EN line: word only
+            cues.append(PlannedCue(
+                text=it.prompt_word,
+                start_s=en_start,
+                duration_s=en_dur,
+                slot_name=f"en_{i}",
+            ))
+
+            # FR reveal: from its answer time to end (or to en_end if you prefer)
+            fr_start = max(0.0, it.a_start - self.lead_in_s)
+            fr_end   = transcript.duration_s
+            fr_dur   = max(0.2, fr_end - fr_start)
 
             cues.append(PlannedCue(
                 text=it.answer_text,
-                start_s=a_start,
-                duration_s=max(0.2, end - a_start),
-                slot_name=slot_name,
+                start_s=fr_start,
+                duration_s=fr_dur,
+                slot_name=f"fr_{i}",
             ))
 
         return cues
@@ -952,7 +978,7 @@ if __name__ == "__main__":
 
     # ---- CAPCUT TEMPLATE SETTINGS ----
     DRAFTS_FOLDER = r"C:\Users\david\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
-    TEMPLATE_NAME = "5_word_template"
+    TEMPLATE_NAME = "6_word_template"
     NEW_DRAFT_NAME = unique_draft_name("ListReveal_Output")
 
 
@@ -971,15 +997,26 @@ if __name__ == "__main__":
         print(f"[{seg.start_s:.2f} - {seg.end_s:.2f}] {seg.text}")
 
     # ---- 2) Choose module ----
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n", type=int, default=6, help="Number of Q/A items to render")
+    args = parser.parse_args()
+    N = max(1, min(20, args.n))  # clamp
+
     registry = ModuleRegistry([
-        ListRevealModule(max_items=5),
+        ListRevealModule(max_items=N),
     ])
     module = registry.get("list_reveal")
+
 
     # ---- 3) Choose layout (pick ONE) ----
     # Use ONE of these depending on how your anchors are structured in the template:
     # layout = make_list_reveal_layout_single_track()
-    layout = make_list_reveal_layout_multi_track()
+    layout = make_list_reveal_layout_en_then_fr(N)
+    print("\n=== SLOT MAP ===")
+    for s in layout.slots():
+        print(f"{s.name:6} -> text track index {s.track_index}, seg {s.segment_index}")
 
     # ---- 4) Build cues ----
     cues = module.build(transcript, layout)
