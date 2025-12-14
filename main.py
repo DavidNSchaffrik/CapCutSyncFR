@@ -6,6 +6,9 @@ from typing import Optional
 import whisperx
 import pycapcut as cc
 from pycapcut import trange
+import json
+import copy
+from typing import Any
 
 
 
@@ -456,6 +459,151 @@ def debug_list_imported_tracks(script_file) -> None:
             seg_count = len(segs) if isinstance(segs, list) else "?"
             print(f"index={i} name={name!r} segments={seg_count}")
 
+
+
+
+def s_to_us(s: float) -> int:
+    return int(round(s * 1_000_000))
+
+
+class DraftJsonPatcher:
+    """
+    Fallback path: edit the duplicated draft's draft_content.json in-place.
+    This preserves styling because we're modifying the existing template segments.
+    """
+
+    def __init__(self, draft_dir: Path):
+        self.draft_dir = draft_dir
+        self.path = self._find_draft_content_json(draft_dir)
+
+    def _find_draft_content_json(self, d: Path) -> Path:
+        # common file name in CapCut drafts
+        p = d / "draft_content.json"
+        if p.exists():
+            return p
+        # fallback: search one level deep
+        for cand in d.rglob("draft_content.json"):
+            return cand
+        raise FileNotFoundError(f"Could not find draft_content.json under: {d}")
+
+    def load(self) -> dict[str, Any]:
+        with self.path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def save(self, data: dict[str, Any]) -> None:
+        # backup once
+        backup = self.path.with_suffix(".json.bak")
+        if not backup.exists():
+            backup.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
+        with self.path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def retime_text_segment(
+        self,
+        track_index: int,
+        segment_index: int,
+        start_s: float,
+        end_s: float,
+    ) -> None:
+        data = self.load()
+
+        # The schema varies slightly by CapCut version; this is the most common shape:
+        # data["tracks"] -> list of track dicts, each has ["type"] and ["segments"].
+        tracks = data.get("tracks")
+        if not isinstance(tracks, list):
+            raise KeyError("draft_content.json: missing 'tracks' list")
+
+        # Filter text tracks in the order they appear
+        text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
+        if track_index >= len(text_tracks):
+            raise IndexError(f"Text track index {track_index} out of range (found {len(text_tracks)} text tracks)")
+
+        track = text_tracks[track_index]
+        segs = track.get("segments")
+        if not isinstance(segs, list) or segment_index >= len(segs):
+            raise IndexError("Segment index out of range for that track")
+
+        seg = segs[segment_index]
+
+        start_us = s_to_us(start_s)
+        dur_us = max(1, s_to_us(end_s - start_s))
+
+        # Common field name:
+        # seg["target_timerange"] = {"start": ..., "duration": ...}
+        tr = seg.get("target_timerange")
+        if isinstance(tr, dict):
+            tr["start"] = start_us
+            tr["duration"] = dur_us
+        else:
+            # Sometimes it's directly fields
+            seg["target_timerange"] = {"start": start_us, "duration": dur_us}
+
+        self.save(data)
+
+
+class TemplateTextSlotWriter:
+    """
+    Writes into EXISTING styled template segments:
+      - replace_text(): preserves styling
+      - retime(): try via object, fallback to JSON patch
+    """
+
+    def __init__(self, project: "CapCutProject"):
+        self.project = project
+
+    def apply(self, slot: TextSlot, text: str, start_s: float, end_s: float) -> None:
+        sf = self.project.script_file
+        if sf is None:
+            raise RuntimeError("CapCutProject has no open script_file")
+
+        # 1) get the imported text track by index
+        t = sf.get_imported_track(cc.TrackType.text, index=slot.track_index)
+
+        # 2) replace the segment text (keeps styling)
+        sf.replace_text(t, slot.segment_index, text)
+
+        # 3) attempt to retime directly (often fails / no-op for imported segments)
+        seg_obj = t.segments[slot.segment_index]
+        if self._try_retime_imported_segment_object(seg_obj, start_s, end_s):
+            return
+
+        # 4) fallback: patch draft_content.json and resave
+        draft_dir = self.project.get_draft_dir()
+        DraftJsonPatcher(draft_dir).retime_text_segment(
+            track_index=slot.track_index,
+            segment_index=slot.segment_index,
+            start_s=start_s,
+            end_s=end_s,
+        )
+
+    def _try_retime_imported_segment_object(self, seg_obj: object, start_s: float, end_s: float) -> bool:
+        """
+        Best-effort. Returns True if it looks like it worked.
+        Many pycapcut imported segment objects won't allow this.
+        """
+        start_us = s_to_us(start_s)
+        dur_us = max(1, s_to_us(end_s - start_s))
+
+        # Possible attribute names across versions:
+        for attr in ("target_timerange", "target_range", "timerange"):
+            if hasattr(seg_obj, attr):
+                tr = getattr(seg_obj, attr)
+                try:
+                    # If it's a Timerange-like object
+                    if hasattr(tr, "start") and hasattr(tr, "duration"):
+                        tr.start = start_us
+                        tr.duration = dur_us
+                        return True
+                    # If it's a dict
+                    if isinstance(tr, dict):
+                        tr["start"] = start_us
+                        tr["duration"] = dur_us
+                        return True
+                except Exception:
+                    pass
+
+        # If no known timerange attribute exists or is writable
+        return False
 
 if __name__ == "__main__":
     # ---- INPUT VIDEO (the final mp4 you want to use) ----
