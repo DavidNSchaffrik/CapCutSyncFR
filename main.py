@@ -393,25 +393,17 @@ class SlotRenderer:
         project.ensure_text_track(self.render_track)
 
         # Create new segments using anchor styling
+        writer = TemplateTextSlotWriter(project)
+
         for cue in cues:
             slot = layout.slot(cue.slot_name)
-
-            anchor_track = project.script_file.get_imported_track(
-                slot.track_type,
-                index=slot.track_index,
-                )
-
-            # If this errors in your environment, paste the error; track/segment access differs by version.
-            anchor_seg = anchor_track.segments[slot.segment_index]
-
-            seg = cc.TextSegment(
-                cue.text,
-                trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
-                font=anchor_seg.font,
-                style=anchor_seg.style,
-                clip_settings=anchor_seg.clip_settings,
+            writer.apply(
+                slot=slot,
+                text=cue.text,
+                start_s=cue.start_s,
+                end_s=cue.start_s + cue.duration_s,
             )
-            project.script_file.add_segment(seg, self.render_track)
+
 
 
          # Wipe the anchor text in template tracks (neutralise originals)
