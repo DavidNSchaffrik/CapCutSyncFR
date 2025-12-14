@@ -647,41 +647,53 @@ class DraftJsonPatcher:
 
     def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> str:
         """
-        Your template's visible text is inside mat["content"] as a JSON-encoded string:
-          {"text":"FR_SLOTS_ANCHOR","styles":[...]}
-        We must parse it, replace only ["text"], and write it back, leaving styles untouched.
-        Returns a label of what was edited.
+        Update text while preserving styling.
+        Returns a string describing what was edited (for debug).
         """
 
-        # 1) Primary case (your dump): content is a JSON string containing a "text" field.
-        c = mat.get("content")
-        if isinstance(c, str):
-            s = c.strip()
-            if s.startswith("{") and '"text"' in s:
-                try:
-                    obj = json.loads(s)
-                    if isinstance(obj, dict) and "text" in obj:
-                        obj["text"] = new_text
-                        mat["content"] = json.dumps(obj, ensure_ascii=False)
-                        return "content(json.text)"
-                except Exception:
-                    # fall through to other attempts
-                    pass
+        # 1) If this material uses the rich JSON string in "content" (your case)
+        if "content" in mat and isinstance(mat["content"], str) and mat["content"].lstrip().startswith("{"):
+            try:
+                obj = json.loads(mat["content"])
+            except Exception:
+                # If it looks like JSON but fails to parse, fall back below
+                obj = None
 
-        # 2) Some projects store content as dict.
-        if isinstance(c, dict):
-            for k in ("text", "value", "raw_text", "rawText", "display_text", "displayText"):
-                if k in c and isinstance(c[k], str):
-                    c[k] = new_text
-                    return f"content.{k}"
+            if isinstance(obj, dict) and "text" in obj:
+                obj["text"] = new_text
+                L = len(new_text)
 
-        # 3) Rare: top-level fields.
+                # Critical: expand style ranges to match new length
+                styles = obj.get("styles")
+                if isinstance(styles, list):
+                    for st in styles:
+                        if isinstance(st, dict) and "range" in st and isinstance(st["range"], list) and len(st["range"]) == 2:
+                            st["range"][0] = 0
+                            st["range"][1] = L
+
+                # Write back compactly (keeps CapCut happier than pretty JSON)
+                mat["content"] = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+                # Optional debug info (remove if noisy)
+                print(f"[STYLE FIX] content(json): new_len={L} ranges={[st.get('range') for st in (styles or []) if isinstance(st, dict)]}")
+
+                return "content(json.text+styles.range)"
+
+        # 2) Fallback: direct string fields (less ideal for rich text templates)
         for k in ("text", "value", "raw_text", "rawText", "display_text", "displayText"):
             if k in mat and isinstance(mat[k], str):
                 mat[k] = new_text
                 return k
 
-        raise KeyError("Found text material, but couldn't locate its text field.")
+        # 3) Nested dict content (different schema)
+        if isinstance(mat.get("content"), dict):
+            c = mat["content"]
+            for k in ("text", "value", "raw_text", "rawText"):
+                if k in c and isinstance(c[k], str):
+                    c[k] = new_text
+                    return f"content.{k}"
+
+        raise KeyError("Found text material, but couldn't locate an editable text field.")
 
 @dataclass(frozen=True)
 class PendingTextUpdate:
