@@ -433,19 +433,24 @@ class SlotRenderer:
     ) -> None:
         project = CapCutProject(self.drafts_folder)
         project.open_from_template(template_name, new_draft_name)
+        debug_dump_scriptfile_attrs(project.script_file)
+        debug_list_imported_tracks(project.script_file)
+        print("draft_dir:", project.get_draft_dir())
+        debug_dump_text_slot(project.get_draft_dir(), 0, 0, "BEFORE en_list")
+        debug_dump_text_slot(project.get_draft_dir(), 1, 0, "BEFORE fr_0")
+        debug_find_text_material_fields(project.get_draft_dir(), 1, 0)
         dump_template_text_segment(project, 0, 0)  # EN anchor
         debug_list_imported_tracks(project.script_file)
         project.replace_video_by_name(placeholder_video_filename, final_video_path)
         project.ensure_text_track(self.render_track)
 
         # Create new segments using anchor styling
+                
         writer = TemplateTextSlotWriter(project)
 
-        # Optional: wipe placeholders first
         for slot in layout.slots():
-            writer.apply(slot, "", 0.0, 0.1)
+            writer.apply(slot, "", 0.0, 0.1)  # optional wipe
 
-        # Apply real cues
         for cue in cues:
             slot = layout.slot(cue.slot_name)
             writer.apply(
@@ -455,13 +460,24 @@ class SlotRenderer:
                 end_s=cue.start_s + cue.duration_s,
             )
 
-        # IMPORTANT: save first so replace_text hits disk
+        # 1) Save FIRST (writes pycapcut's in-memory draft to disk)
         project.save()
+        print("\n=== AFTER first project.save() ===")
+        debug_dump_text_slot(project.get_draft_dir(), 0, 0, "AFTER_SAVE en_list")
+        debug_dump_text_slot(project.get_draft_dir(), 1, 0, "AFTER_SAVE fr_0")
 
-        # Then patch timings on disk (won't overwrite text now)
-        writer.flush_json_retimes()
 
-        project.save()
+
+        # 2) Patch JSON AFTER save (so pycapcut doesn't overwrite it)
+        writer.flush_json_updates()
+        print("\n=== AFTER JSON PATCH FLUSH ===")
+        debug_dump_text_slot(project.get_draft_dir(), 0, 0, "AFTER_PATCH en_list")
+        debug_dump_text_slot(project.get_draft_dir(), 1, 0, "AFTER_PATCH fr_0")
+
+
+
+        # 3) DO NOT call project.save() again here
+
 
 def unique_draft_name(base: str) -> str:
     # tries base, then base_002, base_003, ...
@@ -579,11 +595,13 @@ class DraftJsonPatcher:
 
         self.save(data)
 
-    def replace_text_segment_content(        
+    def replace_text_segment_content(
         self,
         track_index: int,
         segment_index: int,
         new_text: str,
+        debug: bool = True,
+        debug_label: str = "",
     ) -> None:
         data = self.load()
 
@@ -610,22 +628,34 @@ class DraftJsonPatcher:
             raise KeyError("draft_content.json: missing 'materials' dict")
 
         mat = self._find_material_by_id(materials, str(material_id))
-        self._set_text_payload(mat, new_text)
+
+        before = copy.deepcopy(mat)
+
+        edited_key = self._set_text_payload(mat, new_text)
+
+        after = copy.deepcopy(mat)
+
+        if debug:
+            print(f"\n[JSON TEXT PATCH] {debug_label} track={track_index} seg={segment_index} material_id={material_id}")
+            print(f"[JSON TEXT PATCH] edited_key={edited_key!r} new_text={new_text!r}")
+            debug_diff_text_material_before_after(self.draft_dir, track_index, segment_index, before, after)
 
         self.save(data)
 
-    def _find_material_by_id(self, materials: dict[str, Any], material_id: str) -> dict[str, Any]:
-        # materials is a dict of lists: texts, videos, audios, stickers, etc.
-        for group_name, group in materials.items():
-            if not isinstance(group, list):
-                continue
-            for m in group:
-                if not isinstance(m, dict):
-                    continue
-                mid = m.get("id") or m.get("material_id") or m.get("materialId")
-                if mid is not None and str(mid) == material_id:
-                    return m
-        raise KeyError(f"Could not find any material with id={material_id}")
+        def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> str:
+            for k in ("text", "content", "value", "raw_text", "rawText", "display_text", "displayText"):
+                if k in mat and isinstance(mat[k], str):
+                    mat[k] = new_text
+                    return k
+
+            if isinstance(mat.get("content"), dict):
+                c = mat["content"]
+                for k in ("text", "value", "raw_text", "rawText"):
+                    if k in c and isinstance(c[k], str):
+                        c[k] = new_text
+                        return f"content.{k}"
+
+            raise KeyError("Found text material, but couldn't locate its text field.")
 
     def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> None:
         """
@@ -653,33 +683,40 @@ class DraftJsonPatcher:
             "Dump the matching material dict (by id) and we'll target the exact key."
         )
 
+@dataclass(frozen=True)
+class PendingTextUpdate:
+    track_index: int
+    segment_index: int
+    text: str
+
 
 class TemplateTextSlotWriter:
     def __init__(self, project: "CapCutProject"):
         self.project = project
         self.pending_retimes: list[PendingRetime] = []
+        self.pending_text: list[PendingTextUpdate] = []
 
     def apply(self, slot: TextSlot, text: str, start_s: float, end_s: float) -> None:
+        # Queue TEXT update (do not patch JSON yet)
+        self.pending_text.append(
+            PendingTextUpdate(
+                track_index=slot.track_index,
+                segment_index=slot.segment_index,
+                text=text,
+            )
+        )
+
+        # Retime: try in-memory first (rarely works for imported segments)
         sf = self.project.script_file
         if sf is None:
             raise RuntimeError("CapCutProject has no open script_file")
 
         t = sf.get_imported_track(cc.TrackType.text, index=slot.track_index)
-
-        # 1) text update (styling preserved)
-        draft_dir = self.project.get_draft_dir()
-        DraftJsonPatcher(draft_dir).replace_text_segment_content(
-            track_index=slot.track_index,
-            segment_index=slot.segment_index,
-            new_text=text,
-        )
-
-        # 2) try retime in-memory (often not supported for imported segments)
         seg_obj = t.segments[slot.segment_index]
         if self._try_retime_imported_segment_object(seg_obj, start_s, end_s):
             return
 
-        # 3) queue fallback retime for AFTER save()
+        # Otherwise queue retime JSON patch too
         self.pending_retimes.append(
             PendingRetime(
                 track_index=slot.track_index,
@@ -689,14 +726,29 @@ class TemplateTextSlotWriter:
             )
         )
 
-    def flush_json_retimes(self) -> None:
-        if not self.pending_retimes:
+    def flush_json_updates(self) -> None:
+        if not self.pending_text and not self.pending_retimes:
             return
+
         draft_dir = self.project.get_draft_dir()
         patcher = DraftJsonPatcher(draft_dir)
+
+        # Apply TEXT updates first
+        for u in self.pending_text:
+            patcher.replace_text_segment_content(
+                track_index=u.track_index,
+                segment_index=u.segment_index,
+                new_text=u.text,
+            )
+        self.pending_text.clear()
+
+        # Then apply retimes
         for r in self.pending_retimes:
-            patcher.retime_text_segment(r.track_index, r.segment_index, r.start_s, r.end_s)
+            patcher.retime_text_segment(
+                r.track_index, r.segment_index, r.start_s, r.end_s
+            )
         self.pending_retimes.clear()
+
 
     def _try_retime_imported_segment_object(self, seg_obj: object, start_s: float, end_s: float) -> bool:
         start_us = s_to_us(start_s)
@@ -716,6 +768,7 @@ class TemplateTextSlotWriter:
                 except Exception:
                     pass
         return False
+    
 
 
 
@@ -726,6 +779,152 @@ class PendingRetime:
     segment_index: int
     start_s: float
     end_s: float
+
+# Debuggers
+
+import json
+from pathlib import Path
+from typing import Any, Optional
+
+def _pretty(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+def debug_dump_scriptfile_attrs(sf: Any) -> None:
+    print("\n=== ScriptFile attrs (path-ish) ===")
+    keys = [a for a in dir(sf) if "path" in a.lower() or "save" in a.lower() or "draft" in a.lower()]
+    print(keys)
+    for k in keys:
+        try:
+            v = getattr(sf, k)
+            if isinstance(v, (str, int, float, type(None))):
+                print(f"  {k} = {v!r}")
+        except Exception:
+            pass
+
+def debug_list_imported_tracks(sf: Any, max_i: int = 50) -> None:
+    for ttype in (cc.TrackType.text, cc.TrackType.video, cc.TrackType.audio):
+        print(f"\n--- Imported tracks for {ttype} ---")
+        for i in range(max_i):
+            try:
+                t = sf.get_imported_track(ttype, index=i)
+            except Exception:
+                break
+            name = getattr(t, "name", None)
+            segs = getattr(t, "segments", None)
+            seg_count = len(segs) if isinstance(segs, list) else "?"
+            print(f"index={i} name={name!r} segments={seg_count}")
+
+def debug_dump_draft_json_file(draft_dir: Path) -> Path:
+    p = draft_dir / "draft_content.json"
+    if p.exists():
+        print("\n=== draft_content.json path ===")
+        print(str(p))
+        return p
+    for cand in draft_dir.rglob("draft_content.json"):
+        print("\n=== draft_content.json path (found via rglob) ===")
+        print(str(cand))
+        return cand
+    raise FileNotFoundError(f"No draft_content.json under {draft_dir}")
+
+def _find_text_tracks(data: dict[str, Any]) -> list[dict[str, Any]]:
+    tracks = data.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    return [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
+
+def _find_material_by_id(materials: dict[str, Any], material_id: str) -> Optional[dict[str, Any]]:
+    for group_name, group in materials.items():
+        if not isinstance(group, list):
+            continue
+        for m in group:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id") or m.get("material_id") or m.get("materialId")
+            if mid is not None and str(mid) == material_id:
+                m2 = dict(m)
+                m2["_debug_group"] = group_name
+                return m2
+    return None
+
+def debug_dump_text_slot(draft_dir: Path, track_index: int, segment_index: int, label: str) -> None:
+    dc = debug_dump_draft_json_file(draft_dir)
+    data = json.loads(dc.read_text(encoding="utf-8"))
+
+    text_tracks = _find_text_tracks(data)
+    if track_index >= len(text_tracks):
+        print(f"\n[{label}] track_index={track_index} out of range. Found {len(text_tracks)} text tracks")
+        return
+
+    track = text_tracks[track_index]
+    segs = track.get("segments")
+    if not isinstance(segs, list) or segment_index >= len(segs):
+        print(f"\n[{label}] segment_index={segment_index} out of range for track_index={track_index}")
+        return
+
+    seg = segs[segment_index]
+    print(f"\n=== [{label}] TEXT SEGMENT (track={track_index}, seg={segment_index}) ===")
+    print(_pretty(seg))
+
+    material_id = seg.get("material_id") or seg.get("materialId")
+    print(f"\n[{label}] material_id={material_id!r}")
+
+    mats = data.get("materials")
+    if not isinstance(mats, dict):
+        print(f"[{label}] No materials dict in draft_content.json")
+        return
+
+    if material_id is None:
+        print(f"[{label}] Segment has no material_id/materialId")
+        return
+
+    mat = _find_material_by_id(mats, str(material_id))
+    if mat is None:
+        print(f"[{label}] Could not find material with id={material_id}")
+        return
+
+    print(f"\n=== [{label}] TEXT MATERIAL (id={material_id}) group={mat.get('_debug_group')} ===")
+    print(_pretty(mat))
+
+def debug_find_text_material_fields(draft_dir: Path, track_index: int, segment_index: int) -> None:
+    """Print candidate fields that look like they store the actual text string."""
+    dc = debug_dump_draft_json_file(draft_dir)
+    data = json.loads(dc.read_text(encoding="utf-8"))
+    text_tracks = _find_text_tracks(data)
+
+    seg = text_tracks[track_index]["segments"][segment_index]
+    material_id = seg.get("material_id") or seg.get("materialId")
+    mats = data.get("materials", {})
+    mat = _find_material_by_id(mats, str(material_id)) if material_id else None
+    if not mat:
+        print("No material found to inspect")
+        return
+
+    print("\n=== Candidate text fields (top level) ===")
+    for k, v in mat.items():
+        if isinstance(v, str) and len(v) < 500:
+            if any(tok in k.lower() for tok in ["text", "content", "value", "raw", "display", "title", "name"]):
+                print(f"{k} = {v!r}")
+
+    if isinstance(mat.get("content"), dict):
+        print("\n=== Candidate text fields (mat['content']) ===")
+        for k, v in mat["content"].items():
+            if isinstance(v, str) and len(v) < 500:
+                if any(tok in k.lower() for tok in ["text", "content", "value", "raw", "display", "title", "name"]):
+                    print(f"content.{k} = {v!r}")
+
+def debug_diff_text_material_before_after(draft_dir: Path, track_index: int, segment_index: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Very simple diff: prints keys where values changed."""
+    print("\n=== MATERIAL DIFF (before -> after) ===")
+    keys = sorted(set(before.keys()) | set(after.keys()))
+    for k in keys:
+        if before.get(k) != after.get(k):
+            vb = before.get(k)
+            va = after.get(k)
+            # avoid spewing huge nested dicts; show type/len
+            if isinstance(vb, (dict, list)) or isinstance(va, (dict, list)):
+                print(f"{k}: {type(vb).__name__} -> {type(va).__name__}")
+            else:
+                print(f"{k}: {vb!r} -> {va!r}")
 
 
 
