@@ -495,7 +495,7 @@ class SlotRenderer:
 
 
         # 2) Patch JSON AFTER save (so pycapcut doesn't overwrite it)
-        writer.flush_json_updates()
+        writer.flush_json_updates(layout)
         print("\n=== AFTER JSON PATCH FLUSH ===")
         debug_dump_text_slot(project.get_draft_dir(), 0, 0, "AFTER_PATCH en_list")
         debug_dump_text_slot(project.get_draft_dir(), 1, 0, "AFTER_PATCH fr_0")
@@ -619,6 +619,52 @@ class DraftJsonPatcher:
             seg["target_timerange"] = {"start": start_us, "duration": dur_us}
 
         self.save(data)
+
+
+    def normalize_text_tracks_x(self, track_indices: list[int], ref_track_index: int) -> None:
+        """
+        Force all segments in the given text track indices to share the same clip.transform.x
+        as the reference text track index. Leaves Y untouched.
+        """
+        data = self.load()
+
+        tracks = data.get("tracks")
+        if not isinstance(tracks, list):
+            return
+
+        text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
+        if not text_tracks:
+            return
+        if ref_track_index >= len(text_tracks):
+            return
+
+        ref_track = text_tracks[ref_track_index]
+        ref_segs = ref_track.get("segments")
+        if not isinstance(ref_segs, list) or not ref_segs:
+            return
+
+        ref_seg0 = ref_segs[0]
+        ref_x = (
+            ref_seg0.get("clip", {})
+                   .get("transform", {})
+                   .get("x", None)
+        )
+        if ref_x is None:
+            return
+
+        for ti in track_indices:
+            if ti >= len(text_tracks):
+                continue
+            t = text_tracks[ti]
+            segs = t.get("segments")
+            if not isinstance(segs, list) or not segs:
+                continue
+            seg0 = segs[0]
+            seg0.setdefault("clip", {}).setdefault("transform", {})["x"] = ref_x
+
+        self.save(data)
+
+
 
     def replace_text_segment_content(
         self,
@@ -764,7 +810,7 @@ class TemplateTextSlotWriter:
             )
         )
 
-    def flush_json_updates(self) -> None:
+    def flush_json_updates(self, layout: Optional[TemplateLayout] = None) -> None:
         if not self.pending_text and not self.pending_retimes:
             return
 
@@ -786,6 +832,19 @@ class TemplateTextSlotWriter:
                 r.track_index, r.segment_index, r.start_s, r.end_s
             )
         self.pending_retimes.clear()
+
+        # Finally, normalize X positions so left edges don't drift
+        if layout is not None:
+            en_slots = [s for s in layout.slots() if s.name.startswith("en_")]
+            fr_slots = [s for s in layout.slots() if s.name.startswith("fr_")]
+
+            en_indices = sorted({s.track_index for s in en_slots})
+            fr_indices = sorted({s.track_index for s in fr_slots})
+
+            if en_indices:
+                patcher.normalize_text_tracks_x(en_indices, ref_track_index=en_indices[0])
+            if fr_indices:
+                patcher.normalize_text_tracks_x(fr_indices, ref_track_index=fr_indices[0])
 
 
     def _try_retime_imported_segment_object(self, seg_obj: object, start_s: float, end_s: float) -> bool:
