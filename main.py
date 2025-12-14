@@ -308,12 +308,12 @@ class ListRevealModule:
         for i, it in enumerate(items):
             slot_name = f"fr_{min(i, self.max_items - 1)}"
             a_start = max(0.0, it.a_start - self.lead_in_s)
-            a_end = min(transcript.duration_s, it.a_end + self.tail_s)
+            end = transcript.duration_s
 
             cues.append(PlannedCue(
                 text=it.answer_text,
                 start_s=a_start,
-                duration_s=max(0.2, a_end - a_start),
+                duration_s=max(0.2, end - a_start),
                 slot_name=slot_name,
             ))
 
