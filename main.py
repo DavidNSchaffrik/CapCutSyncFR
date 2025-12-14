@@ -379,7 +379,7 @@ class ListRevealModule:
             ))
 
             fr_start = max(0.0, it.a_start - self.lead_in_s)
-            fr_end   = transcript.duration_s
+            fr_end   = en_end
             fr_dur   = max(0.2, fr_end - fr_start)
 
             # FR answer: remove trailing full stop / punctuation
