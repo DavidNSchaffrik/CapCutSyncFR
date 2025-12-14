@@ -12,6 +12,7 @@ from typing import Any
 from typing import Protocol
 import re
 import argparse
+import os
 
 
 
@@ -1025,70 +1026,356 @@ def debug_diff_text_material_before_after(draft_dir: Path, track_index: int, seg
 
 
 
-if __name__ == "__main__":
-    # ---- INPUT VIDEO (the final mp4 you want to use) ----
-    VIDEO_PATH = r"final_video.mp4"
-    WORK_DIR = "./work"
-
-    # ---- WHISPERX ----
-    MODEL = "small"
-    DEVICE = "cpu"           # "cuda" if you have NVIDIA GPU
-    COMPUTE_TYPE = "int8"    # good for CPU
-
-    # ---- CAPCUT TEMPLATE SETTINGS ----
-    DRAFTS_FOLDER = r"C:\Users\david\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft"
-    TEMPLATE_NAME = "6_word_template"
-    NEW_DRAFT_NAME = unique_draft_name("ListReveal_Output")
 
 
-    # This is the filename of the placeholder video material INSIDE the template
-    PLACEHOLDER_VIDEO_FILENAME = "ElevenLabs_2025-10-25T10_46_53_Guillaume-Narration_pvc_sp100_s52_sb47_t2-5.mp4"
-
+def run_single_job(
+    *,
+    video_path: str,
+    n: int,
+    module_name: str,
+    template_name: str,
+    placeholder_video_filename: str,
+    drafts_folder: str,
+    work_dir: str,
+    render_track: str,
+    model: str,
+    device: str,
+    compute_type: str,
+    output_name: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     # ---- 1) Transcribe ----
     extractor = FFmpegAudioExtractor(sample_rate=16000)
-    transcriber = WhisperTranscriber(model_name=MODEL, device=DEVICE, compute_type=COMPUTE_TYPE)
+    transcriber = WhisperTranscriber(model_name=model, device=device, compute_type=compute_type)
     pipeline = VideoToTranscriptPipeline(extractor, transcriber)
-    transcript = pipeline.run(VIDEO_PATH, work_dir=WORK_DIR)
+    transcript = pipeline.run(video_path, work_dir=work_dir)
 
-    print("Language:", transcript.language)
-    print("Duration:", transcript.duration_s)
-    for seg in transcript.segments[:12]:
-        print(f"[{seg.start_s:.2f} - {seg.end_s:.2f}] {seg.text}")
-
-    # ---- 2) Choose module ----
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=6, help="Number of Q/A items to render")
-    args = parser.parse_args()
-    N = max(1, min(20, args.n))  # clamp
-
+    # ---- 2) Module registry ----
+    # Extend this list over time as you add more modules.
     registry = ModuleRegistry([
-        ListRevealModule(max_items=N),
+        ListRevealModule(max_items=n),
     ])
-    module = registry.get("list_reveal")
+    module = registry.get(module_name)
 
-
-    # ---- 3) Choose layout (pick ONE) ----
-    # Use ONE of these depending on how your anchors are structured in the template:
-    # layout = make_list_reveal_layout_single_track()
-    layout = make_list_reveal_layout_en_then_fr(N)
-    print("\n=== SLOT MAP ===")
-    for s in layout.slots():
-        print(f"{s.name:6} -> text track index {s.track_index}, seg {s.segment_index}")
+    # ---- 3) Layout ----
+    layout = make_list_reveal_layout_en_then_fr(n)
 
     # ---- 4) Build cues ----
     cues = module.build(transcript, layout)
 
-    # ---- 5) Render into CapCut draft ----
-    renderer = SlotRenderer(drafts_folder=DRAFTS_FOLDER, render_track="RENDER_TEXT")
+    # ---- 5) Render ----
+    # Generate a collision-safe CapCut draft name.
+    desired = output_name
+    actual = unique_draft_name(desired)
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "desired_output_name": desired,
+            "actual_output_name": actual,
+            "video_path": video_path,
+            "template": template_name,
+            "module": module_name,
+            "n": n,
+            "cues_count": len(cues),
+        }
+
+    renderer = SlotRenderer(drafts_folder=drafts_folder, render_track=render_track)
     renderer.render(
-        template_name=TEMPLATE_NAME,
-        new_draft_name=NEW_DRAFT_NAME,
-        placeholder_video_filename=PLACEHOLDER_VIDEO_FILENAME,
-        final_video_path=VIDEO_PATH,
+        template_name=template_name,
+        new_draft_name=actual,
+        placeholder_video_filename=placeholder_video_filename,
+        final_video_path=video_path,
         layout=layout,
         cues=cues,
     )
 
-    print("Done. Draft created:", NEW_DRAFT_NAME)
+    return {
+        "ok": True,
+        "dry_run": False,
+        "desired_output_name": desired,
+        "actual_output_name": actual,
+        "video_path": video_path,
+        "template": template_name,
+        "module": module_name,
+        "n": n,
+        "cues_count": len(cues),
+    }
+
+
+def _safe_name(s: str) -> str:
+    s2 = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in str(s))
+    return s2.strip("_") or "batch"
+
+
+def _compute_indexed_name(batch_name: str, idx: int, pad: int = 0) -> str:
+    bn = _safe_name(batch_name)
+    if pad and pad > 0:
+        return f"{bn}_{idx:0{pad}d}"
+    return f"{bn}_{idx}"
+
+
+def _ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+def _write_json(path: str, obj: dict[str, Any]) -> None:
+    _ensure_dir(str(Path(path).parent))
+    Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_batch_from_manifest(
+    *,
+    manifest_path: str,
+    batch_name: str,
+    start_index: int,
+    pad: int,
+    default_placeholder: str,
+    default_drafts_folder: str,
+    default_work_dir: str,
+    default_render_track: str,
+    default_model: str,
+    default_device: str,
+    default_compute_type: str,
+    continue_on_error: bool,
+    dry_run: bool,
+    log_dir: str,
+) -> dict[str, Any]:
+    # local import so single-run works without pandas installed
+    import pandas as pd
+
+    mp = Path(manifest_path)
+    if not mp.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+
+    ext = mp.suffix.lower()
+    if ext in (".xlsx", ".xls", ".xlsm"):
+        df = pd.read_excel(mp)
+    elif ext == ".csv":
+        df = pd.read_csv(mp)
+    else:
+        raise ValueError("Manifest must be .xlsx/.xls/.xlsm or .csv")
+
+    df.columns = [str(c).strip() for c in df.columns]
+
+    required = ["input_video", "n", "module", "template"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Manifest missing required columns: {missing}")
+
+    # Optional "enabled" column
+    if "enabled" in df.columns:
+        def _enabled(v: Any) -> bool:
+            if pd.isna(v):
+                return True
+            if isinstance(v, bool):
+                return v
+            s = str(v).strip().lower()
+            return s in ("1", "true", "yes", "y", "on")
+        df = df[df["enabled"].apply(_enabled)]
+
+    run_id = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_folder = str(Path(log_dir) / f"{_safe_name(batch_name)}_{run_id}")
+    _ensure_dir(run_folder)
+
+    results: list[dict[str, Any]] = []
+    idx = start_index
+
+    for row_i, row in df.iterrows():
+        # Per-row overrides (optional)
+        video_path = str(row["input_video"]).strip()
+        n = int(row["n"])
+        module_name = str(row["module"]).strip()
+        template_name = str(row["template"]).strip()
+
+        placeholder = default_placeholder
+        if "placeholder_video" in df.columns and not pd.isna(row.get("placeholder_video")):
+            placeholder = str(row["placeholder_video"]).strip()
+
+        drafts_folder = default_drafts_folder
+        if "drafts_folder" in df.columns and not pd.isna(row.get("drafts_folder")):
+            drafts_folder = str(row["drafts_folder"]).strip()
+
+        work_dir = default_work_dir
+        if "work_dir" in df.columns and not pd.isna(row.get("work_dir")):
+            work_dir = str(row["work_dir"]).strip()
+
+        render_track = default_render_track
+        if "render_track" in df.columns and not pd.isna(row.get("render_track")):
+            render_track = str(row["render_track"]).strip()
+
+        model = default_model
+        if "model" in df.columns and not pd.isna(row.get("model")):
+            model = str(row["model"]).strip()
+
+        device = default_device
+        if "device" in df.columns and not pd.isna(row.get("device")):
+            device = str(row["device"]).strip()
+
+        compute_type = default_compute_type
+        if "compute_type" in df.columns and not pd.isna(row.get("compute_type")):
+            compute_type = str(row["compute_type"]).strip()
+
+        # Output name: optional override per row
+        output_name: Optional[str] = None
+        if "output_name" in df.columns and not pd.isna(row.get("output_name")):
+            output_name = str(row["output_name"]).strip() or None
+
+        if not output_name:
+            output_name = _compute_indexed_name(batch_name, idx, pad)
+
+        request = {
+            "row": int(row_i),
+            "batch_name": batch_name,
+            "index": idx,
+            "output_name": output_name,
+            "input_video": video_path,
+            "n": n,
+            "module": module_name,
+            "template": template_name,
+            "placeholder_video_filename": placeholder,
+            "drafts_folder": drafts_folder,
+            "work_dir": work_dir,
+            "render_track": render_track,
+            "model": model,
+            "device": device,
+            "compute_type": compute_type,
+            "dry_run": dry_run,
+        }
+        _write_json(str(Path(run_folder) / f"{_safe_name(output_name)}.request.json"), request)
+
+        try:
+            resp = run_single_job(
+                video_path=video_path,
+                n=n,
+                module_name=module_name,
+                template_name=template_name,
+                placeholder_video_filename=placeholder,
+                drafts_folder=drafts_folder,
+                work_dir=work_dir,
+                render_track=render_track,
+                model=model,
+                device=device,
+                compute_type=compute_type,
+                output_name=output_name,
+                dry_run=dry_run,
+            )
+            payload = {"ok": True, "request": request, "response": resp}
+            _write_json(str(Path(run_folder) / f"{_safe_name(output_name)}.result.json"), payload)
+            results.append(payload)
+        except Exception as e:
+            payload = {"ok": False, "request": request, "error": repr(e)}
+            _write_json(str(Path(run_folder) / f"{_safe_name(output_name)}.error.json"), payload)
+            results.append(payload)
+            if not continue_on_error:
+                break
+
+        idx += 1
+
+    summary = {
+        "ok": True,
+        "run_id": run_id,
+        "manifest": str(mp),
+        "batch_name": batch_name,
+        "start_index": start_index,
+        "pad": pad,
+        "run_folder": run_folder,
+        "count": len(results),
+        "ok_count": sum(1 for r in results if r["ok"]),
+        "fail_count": sum(1 for r in results if not r["ok"]),
+        "dry_run": dry_run,
+    }
+    _write_json(str(Path(run_folder) / "_summary.json"), summary)
+    return summary
+
+
+def build_cli() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="CapCutSyncFR")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # --- run (single) ---
+    r = sub.add_parser("run", help="Run one job (one input video)")
+    r.add_argument("--input", required=True, help="Input video path")
+    r.add_argument("--n", type=int, required=True, help="Number of quiz items")
+    r.add_argument("--module", default="list_reveal", help="Module name")
+    r.add_argument("--template", required=True, help="CapCut template name")
+    r.add_argument("--placeholder", required=True, help="Placeholder video filename inside the template")
+    r.add_argument("--output-name", required=True, help="Base output draft name (will be made unique if needed)")
+    r.add_argument("--drafts-folder", required=True, help="CapCut drafts folder path")
+    r.add_argument("--work-dir", default="./work", help="Work dir for wav/transcription")
+    r.add_argument("--render-track", default="RENDER_TEXT", help="Text track name to add/ensure")
+    r.add_argument("--model", default="small", help="WhisperX model")
+    r.add_argument("--device", default="cpu", help="cpu/cuda")
+    r.add_argument("--compute-type", default="int8", help="e.g. int8/float16")
+    r.add_argument("--dry-run", action="store_true", help="Validate + plan only; no CapCut write")
+
+    # --- batch ---
+    b = sub.add_parser("batch", help="Run many jobs from Excel/CSV manifest")
+    b.add_argument("--manifest", required=True, help="jobs.xlsx or jobs.csv")
+    b.add_argument("--batch-name", required=True, help='Base name, e.g. "batchvideoqqq"')
+    b.add_argument("--start-index", type=int, default=0, help="Start at this index")
+    b.add_argument("--pad", type=int, default=0, help="Zero pad indexes (e.g. 3 -> 001)")
+    b.add_argument("--continue-on-error", action="store_true", help="Keep going if a row fails")
+    b.add_argument("--dry-run", action="store_true", help="Validate + plan only; no CapCut write")
+    b.add_argument("--log-dir", default="batch_logs", help="Where to write request/result/error JSON")
+
+    # defaults for batch (overridable per-row via manifest columns)
+    b.add_argument("--drafts-folder", required=True, help="Default drafts folder")
+    b.add_argument("--placeholder", required=True, help="Default placeholder video filename inside template")
+    b.add_argument("--work-dir", default="./work", help="Default work dir")
+    b.add_argument("--render-track", default="RENDER_TEXT", help="Default render track")
+    b.add_argument("--model", default="small", help="Default WhisperX model")
+    b.add_argument("--device", default="cpu", help="Default cpu/cuda")
+    b.add_argument("--compute-type", default="int8", help="Default compute type")
+
+    return p
+
+
+def main() -> int:
+    args = build_cli().parse_args()
+
+    if args.cmd == "run":
+        resp = run_single_job(
+            video_path=args.input,
+            n=int(args.n),
+            module_name=args.module,
+            template_name=args.template,
+            placeholder_video_filename=args.placeholder,
+            drafts_folder=args.drafts_folder,
+            work_dir=args.work_dir,
+            render_track=args.render_track,
+            model=args.model,
+            device=args.device,
+            compute_type=args.compute_type,
+            output_name=args.output_name,
+            dry_run=bool(args.dry_run),
+        )
+        print(json.dumps(resp, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "batch":
+        summary = run_batch_from_manifest(
+            manifest_path=args.manifest,
+            batch_name=args.batch_name,
+            start_index=int(args.start_index),
+            pad=int(args.pad),
+            default_placeholder=args.placeholder,
+            default_drafts_folder=args.drafts_folder,
+            default_work_dir=args.work_dir,
+            default_render_track=args.render_track,
+            default_model=args.model,
+            default_device=args.device,
+            default_compute_type=args.compute_type,
+            continue_on_error=bool(args.continue_on_error),
+            dry_run=bool(args.dry_run),
+            log_dir=args.log_dir,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
