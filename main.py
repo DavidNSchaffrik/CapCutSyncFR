@@ -523,20 +523,18 @@ def s_to_us(s: float) -> int:
 
 class DraftJsonPatcher:
     """
-    Fallback path: edit the duplicated draft's draft_content.json in-place.
-    This preserves styling because we're modifying the existing template segments.
+    Edit the duplicated draft's draft_content.json in-place.
+    This preserves styling because we only change the *text payload* and timing fields.
     """
 
     def __init__(self, draft_dir: Path):
-        self.draft_dir = draft_dir
-        self.path = self._find_draft_content_json(draft_dir)
+        self.draft_dir = Path(draft_dir)
+        self.path = self._find_draft_content_json(self.draft_dir)
 
     def _find_draft_content_json(self, d: Path) -> Path:
-        # common file name in CapCut drafts
         p = d / "draft_content.json"
         if p.exists():
             return p
-        # fallback: search one level deep
         for cand in d.rglob("draft_content.json"):
             return cand
         raise FileNotFoundError(f"Could not find draft_content.json under: {d}")
@@ -546,51 +544,52 @@ class DraftJsonPatcher:
             return json.load(f)
 
     def save(self, data: dict[str, Any]) -> None:
-        # backup once
         backup = self.path.with_suffix(".json.bak")
         if not backup.exists():
             backup.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
         with self.path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
 
-    def retime_text_segment(
-        self,
-        track_index: int,
-        segment_index: int,
-        start_s: float,
-        end_s: float,
-    ) -> None:
-        data = self.load()
+    # ----------------------------
+    # Track/segment helpers
+    # ----------------------------
 
-        # The schema varies slightly by CapCut version; this is the most common shape:
-        # data["tracks"] -> list of track dicts, each has ["type"] and ["segments"].
+    def _get_text_track_and_segment(
+        self, data: dict[str, Any], track_index: int, segment_index: int
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         tracks = data.get("tracks")
         if not isinstance(tracks, list):
             raise KeyError("draft_content.json: missing 'tracks' list")
 
-        # Filter text tracks in the order they appear
         text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
         if track_index >= len(text_tracks):
-            raise IndexError(f"Text track index {track_index} out of range (found {len(text_tracks)} text tracks)")
+            raise IndexError(
+                f"Text track index {track_index} out of range (found {len(text_tracks)} text tracks)"
+            )
 
         track = text_tracks[track_index]
         segs = track.get("segments")
         if not isinstance(segs, list) or segment_index >= len(segs):
             raise IndexError("Segment index out of range for that track")
 
-        seg = segs[segment_index]
+        return track, segs[segment_index]
+
+    # ----------------------------
+    # Public patch ops
+    # ----------------------------
+
+    def retime_text_segment(self, track_index: int, segment_index: int, start_s: float, end_s: float) -> None:
+        data = self.load()
+        _, seg = self._get_text_track_and_segment(data, track_index, segment_index)
 
         start_us = s_to_us(start_s)
         dur_us = max(1, s_to_us(end_s - start_s))
 
-        # Common field name:
-        # seg["target_timerange"] = {"start": ..., "duration": ...}
         tr = seg.get("target_timerange")
         if isinstance(tr, dict):
             tr["start"] = start_us
             tr["duration"] = dur_us
         else:
-            # Sometimes it's directly fields
             seg["target_timerange"] = {"start": start_us, "duration": dur_us}
 
         self.save(data)
@@ -604,21 +603,8 @@ class DraftJsonPatcher:
         debug_label: str = "",
     ) -> None:
         data = self.load()
+        _, seg = self._get_text_track_and_segment(data, track_index, segment_index)
 
-        tracks = data.get("tracks")
-        if not isinstance(tracks, list):
-            raise KeyError("draft_content.json: missing 'tracks' list")
-
-        text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
-        if track_index >= len(text_tracks):
-            raise IndexError(f"Text track index {track_index} out of range")
-
-        track = text_tracks[track_index]
-        segs = track.get("segments")
-        if not isinstance(segs, list) or segment_index >= len(segs):
-            raise IndexError("Segment index out of range for that track")
-
-        seg = segs[segment_index]
         material_id = seg.get("material_id") or seg.get("materialId")
         if not material_id:
             raise KeyError("Segment has no material_id/materialId")
@@ -630,58 +616,72 @@ class DraftJsonPatcher:
         mat = self._find_material_by_id(materials, str(material_id))
 
         before = copy.deepcopy(mat)
-
         edited_key = self._set_text_payload(mat, new_text)
-
         after = copy.deepcopy(mat)
 
         if debug:
             print(f"\n[JSON TEXT PATCH] {debug_label} track={track_index} seg={segment_index} material_id={material_id}")
             print(f"[JSON TEXT PATCH] edited_key={edited_key!r} new_text={new_text!r}")
+            # Your helper; keep if you have it, otherwise remove next line.
             debug_diff_text_material_before_after(self.draft_dir, track_index, segment_index, before, after)
 
         self.save(data)
 
-        def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> str:
-            for k in ("text", "content", "value", "raw_text", "rawText", "display_text", "displayText"):
-                if k in mat and isinstance(mat[k], str):
-                    mat[k] = new_text
-                    return k
+    # ----------------------------
+    # Material helpers
+    # ----------------------------
 
-            if isinstance(mat.get("content"), dict):
-                c = mat["content"]
-                for k in ("text", "value", "raw_text", "rawText"):
-                    if k in c and isinstance(c[k], str):
-                        c[k] = new_text
-                        return f"content.{k}"
+    def _find_material_by_id(self, materials: dict[str, Any], material_id: str) -> dict[str, Any]:
+        # materials is a dict of lists: texts, videos, audios, stickers, etc.
+        for group_name, group in materials.items():
+            if not isinstance(group, list):
+                continue
+            for m in group:
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("id") or m.get("material_id") or m.get("materialId")
+                if mid is not None and str(mid) == material_id:
+                    m["_debug_group"] = group_name  # handy in prints
+                    return m
+        raise KeyError(f"Could not find any material with id={material_id}")
 
-            raise KeyError("Found text material, but couldn't locate its text field.")
-
-    def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> None:
+    def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> str:
         """
-        CapCut text materials vary by version/template.
-        Try common fields without touching styling-related keys.
+        Your template's visible text is inside mat["content"] as a JSON-encoded string:
+          {"text":"FR_SLOTS_ANCHOR","styles":[...]}
+        We must parse it, replace only ["text"], and write it back, leaving styles untouched.
+        Returns a label of what was edited.
         """
-        # Most common direct string fields:
-        for k in ("text", "content", "value", "raw_text", "rawText", "display_text", "displayText"):
-            if k in mat and isinstance(mat[k], str):
-                mat[k] = new_text
-                return
 
-        # Sometimes it's nested:
-        # e.g. mat["content"] is dict with ["text"] or ["raw_text"] etc.
-        if isinstance(mat.get("content"), dict):
-            c = mat["content"]
-            for k in ("text", "value", "raw_text", "rawText"):
+        # 1) Primary case (your dump): content is a JSON string containing a "text" field.
+        c = mat.get("content")
+        if isinstance(c, str):
+            s = c.strip()
+            if s.startswith("{") and '"text"' in s:
+                try:
+                    obj = json.loads(s)
+                    if isinstance(obj, dict) and "text" in obj:
+                        obj["text"] = new_text
+                        mat["content"] = json.dumps(obj, ensure_ascii=False)
+                        return "content(json.text)"
+                except Exception:
+                    # fall through to other attempts
+                    pass
+
+        # 2) Some projects store content as dict.
+        if isinstance(c, dict):
+            for k in ("text", "value", "raw_text", "rawText", "display_text", "displayText"):
                 if k in c and isinstance(c[k], str):
                     c[k] = new_text
-                    return
+                    return f"content.{k}"
 
-        # If you hit this, we need to inspect the material JSON for that id.
-        raise KeyError(
-            "Found text material, but couldn't locate its text field. "
-            "Dump the matching material dict (by id) and we'll target the exact key."
-        )
+        # 3) Rare: top-level fields.
+        for k in ("text", "value", "raw_text", "rawText", "display_text", "displayText"):
+            if k in mat and isinstance(mat[k], str):
+                mat[k] = new_text
+                return k
+
+        raise KeyError("Found text material, but couldn't locate its text field.")
 
 @dataclass(frozen=True)
 class PendingTextUpdate:
