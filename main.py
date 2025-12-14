@@ -444,22 +444,7 @@ class SlotRenderer:
 
 
 
-         # Wipe the anchor text in template tracks (neutralise originals)
-        seen: set[tuple[cc.TrackType, int]] = set()
-
-        for slot in layout.slots():
-            key = (slot.track_type, slot.track_index)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            t = project.script_file.get_imported_track(slot.track_type, index=slot.track_index)
-
-            for idx in range(len(t.segments)):
-                try:
-                    project.script_file.replace_text(t, idx, "")
-                except Exception:
-                    pass
+         
        
 
 
