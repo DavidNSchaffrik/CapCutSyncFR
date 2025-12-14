@@ -375,29 +375,18 @@ class CapCutProject:
         self.script_file.save()
 
     def get_draft_dir(self) -> Path:
-        """
-        Try to locate the duplicated draft directory. pycapcut versions differ;
-        this prints candidates so you can see what exists.
-        """
-        if self._draft_dir is not None:
-            return self._draft_dir
-
         if self.script_file is None:
-            raise RuntimeError("open_from_template() must be called before get_draft_dir()")
+            raise RuntimeError("open_from_template() must be called first")
 
-        candidates: list[tuple[str, Any]] = []
-        for attr in ("draft_dir", "draft_path", "_draft_dir", "_draft_path", "path"):
-            p = getattr(self.script_file, attr, None)
-            if p:
-                candidates.append((attr, p))
+        save_path = getattr(self.script_file, "save_path", None)
+        if not save_path:
+            raise RuntimeError("script_file has no save_path")
 
-        print("Draft dir candidates:", candidates)
+        draft_dir = Path(save_path).parent
+        if not draft_dir.exists():
+            raise RuntimeError(f"Draft dir does not exist: {draft_dir}")
 
-        if candidates:
-            self._draft_dir = Path(candidates[0][1])
-            return self._draft_dir
-
-        raise RuntimeError("Could not locate draft directory from script_file")
+        return draft_dir
 
 
     
