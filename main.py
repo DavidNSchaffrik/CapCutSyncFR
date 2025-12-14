@@ -9,8 +9,12 @@ from pycapcut import trange
 import json
 import copy
 from typing import Any
+from typing import Protocol
 
 
+class QuizModule(Protocol):
+    name: str
+    def build(self, transcript: Transcript, layout: TemplateLayout) -> list[PlannedCue]: ...
 
 @dataclass(frozen=True)
 class ScriptLine:
@@ -263,12 +267,12 @@ def make_list_reveal_layout_multi_track() -> TemplateLayout:
     """
     return TemplateLayout(slots=[
 
-        TextSlot("en_list", cc.TrackType.text, track_index=0, segment_index=0),
-        TextSlot("fr_0",    cc.TrackType.text, track_index=1, segment_index=0),
-        TextSlot("fr_1",    cc.TrackType.text, track_index=2, segment_index=0),
-        TextSlot("fr_2",    cc.TrackType.text, track_index=3, segment_index=0),
-        TextSlot("fr_3",    cc.TrackType.text, track_index=4, segment_index=0),
-        TextSlot("fr_4",    cc.TrackType.text, track_index=5, segment_index=0),
+        TextSlot("en_list", track_type=cc.TrackType.text, track_index=0, segment_index=0),
+        TextSlot("fr_0",    track_type=cc.TrackType.text, track_index=1, segment_index=0),
+        TextSlot("fr_1",    track_type=cc.TrackType.text, track_index=2, segment_index=0),
+        TextSlot("fr_2",    track_type=cc.TrackType.text, track_index=3, segment_index=0),
+        TextSlot("fr_3",    track_type=cc.TrackType.text, track_index=4, segment_index=0),
+        TextSlot("fr_4",    track_type=cc.TrackType.text, track_index=5, segment_index=0),
     ])
 
     
@@ -336,35 +340,67 @@ class CapCutProject:
         self.cc = cc
         self.trange = trange
         self.draft_folder = cc.DraftFolder(drafts_folder)
-        self.script_file = None
-
+        self.script_file = None  # will be set by open_from_template()
+        self._draft_dir: Optional[Path] = None  # cache
 
     def open_from_template(self, template_name: str, new_name: str) -> None:
         self.script_file = self.draft_folder.duplicate_as_template(template_name, new_name)
 
+        # DEBUG (safe): runs after instance exists
+        print("script_file:", type(self.script_file))
+        print(
+            "script_file draft/path attrs:",
+            [a for a in dir(self.script_file) if "draft" in a.lower() or "path" in a.lower()],
+        )
+
     def replace_video_by_name(self, placeholder_filename: str, new_video_path: str) -> None:
+        if self.script_file is None:
+            raise RuntimeError("open_from_template() must be called before replace_video_by_name()")
         self.script_file.replace_material_by_name(
             placeholder_filename,
-            self.cc.VideoMaterial(new_video_path)
+            self.cc.VideoMaterial(new_video_path),
         )
 
     def ensure_text_track(self, track_name: str) -> None:
+        if self.script_file is None:
+            raise RuntimeError("open_from_template() must be called before ensure_text_track()")
         try:
             self.script_file.add_track(self.cc.TrackType.text, track_name)
         except Exception:
             pass
 
-    def add_text_cue(self, cue: TextCue) -> None:
-        seg = self.cc.TextSegment(
-            cue.text,
-            self.trange(f"{cue.start_s}s", f"{cue.duration_s}s"),
-        )
-        self.script_file.add_segment(seg, cue.track)
-
-
     def save(self) -> None:
+        if self.script_file is None:
+            raise RuntimeError("open_from_template() must be called before save()")
         self.script_file.save()
 
+    def get_draft_dir(self) -> Path:
+        """
+        Try to locate the duplicated draft directory. pycapcut versions differ;
+        this prints candidates so you can see what exists.
+        """
+        if self._draft_dir is not None:
+            return self._draft_dir
+
+        if self.script_file is None:
+            raise RuntimeError("open_from_template() must be called before get_draft_dir()")
+
+        candidates: list[tuple[str, Any]] = []
+        for attr in ("draft_dir", "draft_path", "_draft_dir", "_draft_path", "path"):
+            p = getattr(self.script_file, attr, None)
+            if p:
+                candidates.append((attr, p))
+
+        print("Draft dir candidates:", candidates)
+
+        if candidates:
+            self._draft_dir = Path(candidates[0][1])
+            return self._draft_dir
+
+        raise RuntimeError("Could not locate draft directory from script_file")
+
+
+    
 
 class SlotRenderer:
     """
@@ -388,6 +424,7 @@ class SlotRenderer:
     ) -> None:
         project = CapCutProject(self.drafts_folder)
         project.open_from_template(template_name, new_draft_name)
+        dump_template_text_segment(project, 0, 0)  # EN anchor
         debug_list_imported_tracks(project.script_file)
         project.replace_video_by_name(placeholder_video_filename, final_video_path)
         project.ensure_text_track(self.render_track)
@@ -395,6 +432,11 @@ class SlotRenderer:
         # Create new segments using anchor styling
         writer = TemplateTextSlotWriter(project)
 
+        # Optional: wipe placeholders first
+        for slot in layout.slots():
+            writer.apply(slot, "", 0.0, 0.1)
+
+        # Apply real cues
         for cue in cues:
             slot = layout.slot(cue.slot_name)
             writer.apply(
@@ -403,6 +445,13 @@ class SlotRenderer:
                 start_s=cue.start_s,
                 end_s=cue.start_s + cue.duration_s,
             )
+
+        # IMPORTANT: save first so replace_text hits disk
+        project.save()
+
+        # Then patch timings on disk (won't overwrite text now)
+        writer.flush_json_retimes()
+
 
 
 
@@ -451,7 +500,18 @@ def debug_list_imported_tracks(script_file) -> None:
             seg_count = len(segs) if isinstance(segs, list) else "?"
             print(f"index={i} name={name!r} segments={seg_count}")
 
+def dump_template_text_segment(project: CapCutProject, track_index: int, segment_index: int) -> None:
+        draft_dir = project.get_draft_dir()
+        patcher = DraftJsonPatcher(draft_dir)
+        data = patcher.load()
 
+        tracks = data.get("tracks", [])
+        text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
+
+        seg = text_tracks[track_index]["segments"][segment_index]
+        out = draft_dir / f"debug_text_track_{track_index}_seg_{segment_index}.json"
+        out.write_text(json.dumps(seg, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("Wrote segment dump:", out)
 
 
 def s_to_us(s: float) -> int:
@@ -534,68 +594,74 @@ class DraftJsonPatcher:
 
 
 class TemplateTextSlotWriter:
-    """
-    Writes into EXISTING styled template segments:
-      - replace_text(): preserves styling
-      - retime(): try via object, fallback to JSON patch
-    """
-
     def __init__(self, project: "CapCutProject"):
         self.project = project
+        self.pending_retimes: list[PendingRetime] = []
 
     def apply(self, slot: TextSlot, text: str, start_s: float, end_s: float) -> None:
         sf = self.project.script_file
         if sf is None:
             raise RuntimeError("CapCutProject has no open script_file")
 
-        # 1) get the imported text track by index
         t = sf.get_imported_track(cc.TrackType.text, index=slot.track_index)
 
-        # 2) replace the segment text (keeps styling)
+        # 1) text update (styling preserved)
         sf.replace_text(t, slot.segment_index, text)
 
-        # 3) attempt to retime directly (often fails / no-op for imported segments)
+        # 2) try retime in-memory (often not supported for imported segments)
         seg_obj = t.segments[slot.segment_index]
         if self._try_retime_imported_segment_object(seg_obj, start_s, end_s):
             return
 
-        # 4) fallback: patch draft_content.json and resave
-        draft_dir = self.project.get_draft_dir()
-        DraftJsonPatcher(draft_dir).retime_text_segment(
-            track_index=slot.track_index,
-            segment_index=slot.segment_index,
-            start_s=start_s,
-            end_s=end_s,
+        # 3) queue fallback retime for AFTER save()
+        self.pending_retimes.append(
+            PendingRetime(
+                track_index=slot.track_index,
+                segment_index=slot.segment_index,
+                start_s=start_s,
+                end_s=end_s,
+            )
         )
 
+    def flush_json_retimes(self) -> None:
+        if not self.pending_retimes:
+            return
+        draft_dir = self.project.get_draft_dir()
+        patcher = DraftJsonPatcher(draft_dir)
+        for r in self.pending_retimes:
+            patcher.retime_text_segment(r.track_index, r.segment_index, r.start_s, r.end_s)
+        self.pending_retimes.clear()
+
     def _try_retime_imported_segment_object(self, seg_obj: object, start_s: float, end_s: float) -> bool:
-        """
-        Best-effort. Returns True if it looks like it worked.
-        Many pycapcut imported segment objects won't allow this.
-        """
         start_us = s_to_us(start_s)
         dur_us = max(1, s_to_us(end_s - start_s))
-
-        # Possible attribute names across versions:
         for attr in ("target_timerange", "target_range", "timerange"):
             if hasattr(seg_obj, attr):
                 tr = getattr(seg_obj, attr)
                 try:
-                    # If it's a Timerange-like object
                     if hasattr(tr, "start") and hasattr(tr, "duration"):
                         tr.start = start_us
                         tr.duration = dur_us
                         return True
-                    # If it's a dict
                     if isinstance(tr, dict):
                         tr["start"] = start_us
                         tr["duration"] = dur_us
                         return True
                 except Exception:
                     pass
-
-        # If no known timerange attribute exists or is writable
         return False
+
+
+
+
+@dataclass(frozen=True)
+class PendingRetime:
+    track_index: int
+    segment_index: int
+    start_s: float
+    end_s: float
+
+
 
 if __name__ == "__main__":
     # ---- INPUT VIDEO (the final mp4 you want to use) ----
