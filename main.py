@@ -10,6 +10,7 @@ import json
 import copy
 from typing import Any
 from typing import Protocol
+import re
 
 
 class QuizModule(Protocol):
@@ -221,6 +222,23 @@ class VideoToTranscriptPipeline:
 
 class QuizParser:
     """Transcript -> list[QuizItem] assuming Question? then Answer."""
+
+    @staticmethod
+    def extract_english_word(question: str) -> str:
+        """
+        "How do we say summer in French ?" -> "summer"
+        Handles quotes and stray punctuation.
+        """
+        q = question.strip()
+
+        m = re.search(r"say\s+(.+?)\s+in\s+french", q, flags=re.IGNORECASE)
+        if m:
+            word = m.group(1).strip()
+        else:
+            word = q
+
+        return word.strip(' "\'“”‘’?!.:,;')
+
     def parse(self, transcript: Transcript) -> list[QuizItem]:
         items: list[QuizItem] = []
         segs = transcript.segments
@@ -236,7 +254,7 @@ class QuizParser:
 
             items.append(
                 QuizItem(
-                    prompt_word=extract_english_word(q.text.strip()),
+                    prompt_word=self.extract_english_word(q.text.strip()),
                     question_text=q.text.strip(),
                     answer_text=a.text.strip(),
                     q_start=q.start_s,
@@ -245,31 +263,9 @@ class QuizParser:
                     a_end=a.end_s,
                 )
             )
-
             i += 2
 
         return items
-    import re
-
-    def extract_english_word(question: str) -> str:
-        """
-        "How do we say summer in French ?" -> "summer"
-        Handles quotes and stray punctuation.
-        """
-        q = question.strip()
-
-        # common pattern
-        m = re.search(r"say\s+(.+?)\s+in\s+french", q, flags=re.IGNORECASE)
-        if m:
-            word = m.group(1).strip()
-        else:
-            # fallback: last meaningful token
-            word = q
-
-        # strip quotes/punct
-        word = word.strip(' "\'“”‘’?!.:,;')
-        return word
-
 
 class TemplateLayout:
     def __init__(self, slots: list[TextSlot]):
@@ -583,6 +579,80 @@ class DraftJsonPatcher:
 
         self.save(data)
 
+    def replace_text_segment_content(        
+        self,
+        track_index: int,
+        segment_index: int,
+        new_text: str,
+    ) -> None:
+        data = self.load()
+
+        tracks = data.get("tracks")
+        if not isinstance(tracks, list):
+            raise KeyError("draft_content.json: missing 'tracks' list")
+
+        text_tracks = [t for t in tracks if t.get("type") in ("text", "Text", "TRACK_TYPE_TEXT")]
+        if track_index >= len(text_tracks):
+            raise IndexError(f"Text track index {track_index} out of range")
+
+        track = text_tracks[track_index]
+        segs = track.get("segments")
+        if not isinstance(segs, list) or segment_index >= len(segs):
+            raise IndexError("Segment index out of range for that track")
+
+        seg = segs[segment_index]
+        material_id = seg.get("material_id") or seg.get("materialId")
+        if not material_id:
+            raise KeyError("Segment has no material_id/materialId")
+
+        materials = data.get("materials")
+        if not isinstance(materials, dict):
+            raise KeyError("draft_content.json: missing 'materials' dict")
+
+        mat = self._find_material_by_id(materials, str(material_id))
+        self._set_text_payload(mat, new_text)
+
+        self.save(data)
+
+    def _find_material_by_id(self, materials: dict[str, Any], material_id: str) -> dict[str, Any]:
+        # materials is a dict of lists: texts, videos, audios, stickers, etc.
+        for group_name, group in materials.items():
+            if not isinstance(group, list):
+                continue
+            for m in group:
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("id") or m.get("material_id") or m.get("materialId")
+                if mid is not None and str(mid) == material_id:
+                    return m
+        raise KeyError(f"Could not find any material with id={material_id}")
+
+    def _set_text_payload(self, mat: dict[str, Any], new_text: str) -> None:
+        """
+        CapCut text materials vary by version/template.
+        Try common fields without touching styling-related keys.
+        """
+        # Most common direct string fields:
+        for k in ("text", "content", "value", "raw_text", "rawText", "display_text", "displayText"):
+            if k in mat and isinstance(mat[k], str):
+                mat[k] = new_text
+                return
+
+        # Sometimes it's nested:
+        # e.g. mat["content"] is dict with ["text"] or ["raw_text"] etc.
+        if isinstance(mat.get("content"), dict):
+            c = mat["content"]
+            for k in ("text", "value", "raw_text", "rawText"):
+                if k in c and isinstance(c[k], str):
+                    c[k] = new_text
+                    return
+
+        # If you hit this, we need to inspect the material JSON for that id.
+        raise KeyError(
+            "Found text material, but couldn't locate its text field. "
+            "Dump the matching material dict (by id) and we'll target the exact key."
+        )
+
 
 class TemplateTextSlotWriter:
     def __init__(self, project: "CapCutProject"):
@@ -597,7 +667,12 @@ class TemplateTextSlotWriter:
         t = sf.get_imported_track(cc.TrackType.text, index=slot.track_index)
 
         # 1) text update (styling preserved)
-        sf.replace_text(t, slot.segment_index, text)
+        draft_dir = self.project.get_draft_dir()
+        DraftJsonPatcher(draft_dir).replace_text_segment_content(
+            track_index=slot.track_index,
+            segment_index=slot.segment_index,
+            new_text=text,
+        )
 
         # 2) try retime in-memory (often not supported for imported segments)
         seg_obj = t.segments[slot.segment_index]
