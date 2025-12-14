@@ -223,15 +223,39 @@ class VideoToTranscriptPipeline:
         return self.transcriber.transcribe(wav)
 
 
+def _capitalize_first(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+    return s[0].upper() + s[1:]
+
+
+def _strip_trailing_french_punct(s: str) -> str:
+    """
+    Remove trailing sentence punctuation that Whisper often adds.
+    Keeps internal punctuation, only trims the end.
+    Examples:
+      "Le pain." -> "Le pain"
+      "L'ami.." -> "L'ami"
+      "La mère !" -> "La mère"
+    """
+    s = (s or "").strip()
+
+    # remove repeated trailing punctuation (including unicode ellipsis)
+    s = re.sub(r'[\s]*[\.…!?]+[\s]*$', '', s)
+
+    # also remove a trailing comma/colon/semicolon if it happens
+    s = re.sub(r'[\s]*[,:;]+[\s]*$', '', s)
+
+    return s.strip()
+
+
+
 class QuizParser:
     """Transcript -> list[QuizItem] assuming Question? then Answer."""
 
     @staticmethod
     def extract_english_word(question: str) -> str:
-        """
-        "How do we say summer in French ?" -> "summer"
-        Handles quotes and stray punctuation.
-        """
         q = question.strip()
 
         m = re.search(r"say\s+(.+?)\s+in\s+french", q, flags=re.IGNORECASE)
@@ -240,7 +264,8 @@ class QuizParser:
         else:
             word = q
 
-        return word.strip(' "\'“”‘’?!.:,;')
+        word = word.strip(' "\'“”‘’?!.:,;')
+        return _capitalize_first(word)
 
     def parse(self, transcript: Transcript) -> list[QuizItem]:
         items: list[QuizItem] = []
@@ -324,10 +349,6 @@ def make_list_reveal_layout_en_then_fr(n: int) -> TemplateLayout:
 
 
 class ListRevealModule:
-    """
-    One EN slot per item (en_0..en_{N-1})
-    One FR slot per item (fr_0..fr_{N-1})
-    """
     name = "list_reveal"
 
     def __init__(self, max_items: int = 6, lead_in_s: float = 0.05, tail_s: float = 0.10):
@@ -342,27 +363,30 @@ class ListRevealModule:
 
         cues: list[PlannedCue] = []
 
-        # EN should be visible for the whole quiz window
         en_start = max(0.0, items[0].q_start - self.lead_in_s)
         en_end   = min(transcript.duration_s, items[-1].a_end + self.tail_s)
         en_dur   = max(0.2, en_end - en_start)
 
         for i, it in enumerate(items):
-            # EN line: word only
+            # EN word: capitalized
+            en_text = _capitalize_first(it.prompt_word)
+
             cues.append(PlannedCue(
-                text=it.prompt_word,
+                text=en_text,
                 start_s=en_start,
                 duration_s=en_dur,
                 slot_name=f"en_{i}",
             ))
 
-            # FR reveal: from its answer time to end (or to en_end if you prefer)
             fr_start = max(0.0, it.a_start - self.lead_in_s)
             fr_end   = transcript.duration_s
             fr_dur   = max(0.2, fr_end - fr_start)
 
+            # FR answer: remove trailing full stop / punctuation
+            fr_text = _strip_trailing_french_punct(it.answer_text)
+
             cues.append(PlannedCue(
-                text=it.answer_text,
+                text=fr_text,
                 start_s=fr_start,
                 duration_s=fr_dur,
                 slot_name=f"fr_{i}",
